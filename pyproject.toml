@@ -1,21 +1,40 @@
 [project]
 name = "adaptiverag"
-version = "0.1.0"
+version = "0.2.0"
 description = "AdaptiveRAG: Query-Aware Retrieval Optimization for Efficient RAG"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = [
+    "pydantic>=2.9.0",
+    "pydantic-settings>=2.4.0",
+    "pdfplumber>=0.11.0",
+    "openai>=1.40.0",
+    "groq>=0.11.0",
+    "qdrant-client>=1.12.0",
+    "tiktoken>=0.7.0",
+    "numpy>=1.26.0",
+]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0.0",
+    "reportlab>=4.0.0",
 ]
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[tool.hatch.build.targets.wheel]
+packages = ["src/adaptive_rag"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_functions = ["test_*"]
+pythonpath = ["src", "."]
+markers = [
+    "integration: tests requiring live API keys or prebuilt artifacts (deselected by default)",
+]
+addopts = "-m 'not integration'"
+

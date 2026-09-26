@@ -41,6 +41,19 @@ data/raw/*
 data/processed/*
 !data/processed/.gitkeep
 
+# Local storage and caches (Phase 2)
+storage/
+!storage/.gitkeep
+*.sqlite3
+*.sqlite3-journal
+*.sqlite3-wal
+*.sqlite3-shm
+
+# Experiments output runs (Phase 2)
+experiments/*/
+!experiments/.gitkeep
+!experiments/README.md
+
 # IDEs & OS
 .vscode/
 .idea/
