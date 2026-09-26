@@ -1,0 +1,51 @@
+"""
+evaluation package initialization.
+"""
+
+from adaptive_rag.evaluation.base import (
+    Evaluator,
+    build_error_breakdown,
+    count_errors,
+    failed_traces,
+    mean,
+    metric,
+    percentile,
+)
+from adaptive_rag.evaluation.dataset import (
+    DEFAULT_DATASET_PATH,
+    load_evaluation_dataset,
+    relevant_chunk_ids,
+    validate_against_corpus,
+)
+from adaptive_rag.evaluation.efficiency import EfficiencyEvaluator
+from adaptive_rag.evaluation.generation import (
+    EVALUATOR_VERSION as GENERATION_EVALUATOR_VERSION,
+    GenerationEvaluator,
+    rouge_l,
+    token_f1,
+)
+from adaptive_rag.evaluation.judge import GroqLLMJudge, JudgeCache, judge_cache_key
+from adaptive_rag.evaluation.retrieval import RetrievalEvaluator
+
+__all__ = [
+    "DEFAULT_DATASET_PATH",
+    "EfficiencyEvaluator",
+    "Evaluator",
+    "GENERATION_EVALUATOR_VERSION",
+    "GenerationEvaluator",
+    "GroqLLMJudge",
+    "JudgeCache",
+    "RetrievalEvaluator",
+    "build_error_breakdown",
+    "count_errors",
+    "failed_traces",
+    "judge_cache_key",
+    "load_evaluation_dataset",
+    "mean",
+    "metric",
+    "percentile",
+    "relevant_chunk_ids",
+    "rouge_l",
+    "token_f1",
+    "validate_against_corpus",
+]
