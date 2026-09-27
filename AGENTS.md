@@ -38,7 +38,7 @@ For non-trivial tasks:
 
 1. Read `docs/progress.md`.
 2. Read the current `docs/phases/phase-N.md`.
-3. Read `docs/decisions.md` when making or modifying architectural decisions.
+3. Read `docs/decision.md` when making or modifying architectural decisions.
 4. Read `docs/architecture.md` only when system-wide architecture details are
    needed.
 
@@ -57,8 +57,8 @@ Current progression:
 
 * Phase 1 — Corpus Foundation: COMPLETE
 * Phase 2 — Dense RAG Baseline: COMPLETE
-* Phase 3 — BM25: CURRENT
-* Phase 4 — Hybrid: FUTURE
+* Phase 3 — BM25: COMPLETE
+* Phase 4 — Hybrid: NEXT
 * Phase 5 — Reranking: FUTURE
 * Phase 6 — Adaptive Routing: FUTURE
 
@@ -86,7 +86,7 @@ state changed:
 
 * `docs/progress.md` → status, completed work, validation, next steps.
 * `docs/phases/phase-N.md` → current phase scope, decisions, validation, DoD.
-* `docs/decisions.md` → important architectural decisions.
+* `docs/decision.md` → important architectural decisions.
 * `docs/architecture.md` → actual system architecture changes.
 
 Do not update documentation for every minor code change.

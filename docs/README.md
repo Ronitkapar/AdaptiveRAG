@@ -35,7 +35,7 @@ Contains:
 
 ---
 
-### `decisions.md`
+### `decision.md`
 
 Current accepted architectural decisions.
 

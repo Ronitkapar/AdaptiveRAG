@@ -33,10 +33,41 @@ Reranking
 Adaptive Routing
 ```
 
-The current implementation has established the Dense-RAG baseline.
+The current implementation has established the Dense-RAG baseline (Phase 2)
+and the BM25 lexical baseline (Phase 3). Both operate over the same canonical
+chunk corpus and share the same retrieval/evaluation contracts.
 
 Future retrieval strategies should reuse the existing retrieval and
 evaluation contracts wherever possible.
+
+---
+
+# 3a. Phase 3 BM25 Branch
+
+Phase 3 adds an independent lexical branch alongside the dense pipeline:
+
+```text
+Structured Chunks (canonical corpus)
+        ↓
+BM25Index (inverted index, JSON at storage/bm25/)
+        ↓
+BM25Retriever (native Okapi BM25 scores)
+        ↓
+Retrieved Context (common RetrievalResponse)
+        ↓
+Context Builder / Evaluation
+```
+
+Guarantees:
+
+* Corpus parity: BM25 reads the same canonical chunks as dense, without
+  modifying them or assuming a fixed count.
+* Zero coupling: dense and BM25 never import or fall back to each other.
+* Common protocol: both implement `Retriever` and emit `RetrievalResponse`
+  with `retrieval_method ∈ {"dense", "bm25"}`, so the evaluation pipeline
+  stays strategy-agnostic.
+* Scores are native BM25 values (unnormalized); provenance and metadata are
+  preserved end-to-end.
 
 ---
 

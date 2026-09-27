@@ -341,7 +341,37 @@ Current state:
 ```text
 Phase 1 → COMPLETE
 Phase 2 → COMPLETE
-Phase 3 → NEXT
+Phase 3 → COMPLETE
+Phase 4 → NEXT
 ```
 
 Future functionality must not be implemented prematurely.
+
+---
+
+## ADR-018 — Independent BM25 Retrieval Strategy and Indexing Architecture
+
+Status: ACCEPTED
+
+Phase 3 introduces BM25 as an independent lexical retrieval strategy:
+
+* BM25 indexes the **same canonical chunk corpus** as dense retrieval
+  (`data/processed/chunks/*.chunks.jsonl`) without modifying it or assuming a
+  fixed chunk count.
+* `BM25Retriever` and `DenseRetriever` are fully decoupled: neither imports,
+  calls, nor falls back to the other (architecture-guard enforced).
+* Both conform to the common `Retriever` protocol and return the same
+  `RetrievalResponse` contract, so evaluation remains strategy-agnostic.
+* Scores are **native, unnormalized Okapi BM25 scores** (`k1=1.2`, `b=0.75`,
+  non-negative Robertson IDF); no artificial normalization is applied.
+* Preprocessing is deterministic and symmetric between indexing and querying
+  (Unicode NFKD, diacritic stripping, lowercase, alphanumeric tokens).
+* The BM25 index persists as JSON under `storage/bm25/` with a
+  `corpus_version` staleness guard; a missing or corrupt index fails fast with
+  typed errors, while a valid query with no lexical overlap returns
+  `status="no_results"`.
+* `retrieval_method` and `retriever_version` remain strictly aligned
+  (`dense ⇔ dense_v1`, `bm25 ⇔ bm25_v1`) across configuration, execution
+  traces, and manifests.
+* No hybrid fusion/RRF, reranking, or routing logic is included; results are
+  structured for later Phase 4 consumption.

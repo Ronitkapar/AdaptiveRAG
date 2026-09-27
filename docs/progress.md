@@ -33,8 +33,8 @@ Evaluation will consider:
 | ---------------------------------- | ------------------------------------------- |
 | Phase 1 — Corpus Foundation        | COMPLETE                                    |
 | Phase 2 — Fixed Dense-RAG Baseline | IMPLEMENTATION COMPLETE / OFFLINE VALIDATED |
-| Phase 3 — BM25                     | NOT STARTED                                 |
-| Phase 4 — Hybrid                   | FUTURE                                      |
+| Phase 3 — BM25                     | COMPLETE                                    |
+| Phase 4 — Hybrid                   | NEXT                                        |
 | Phase 5 — Reranking                | FUTURE                                      |
 | Phase 6 — Adaptive Routing         | FUTURE                                      |
 | Phase 7 — Evaluation & Ablations   | FUTURE                                      |
@@ -193,40 +193,90 @@ recalibrated before freezing the current corpus.
 
 ---
 
-# Remaining Phase 2 User-Side Validation
+# Phase 3 — BM25 Lexical Retrieval
 
-The implementation is complete, but live provider execution still requires
-the user's credentials.
+Status: COMPLETE
 
-Expected sequence:
+Implemented:
+
+* Deterministic symmetric tokenizer (NFKD + diacritic stripping + lowercase +
+  alphanumeric tokens)
+* `BM25Index` — inverted index, non-negative Robertson IDF, Okapi BM25
+  scoring (`k1=1.2`, `b=0.75`), JSON persistence with corpus-version staleness
+  guard (`storage/bm25/bm25_index.json`)
+* `BM25Retriever` — conforms to the `Retriever` protocol, native BM25 scores,
+  1-indexed ranks, full metadata/provenance, typed failure vs. empty semantics
+* Configuration consistency: `retrieval_method` ⇔ `retriever_version`
+  (`dense ⇔ dense_v1`, `bm25 ⇔ bm25_v1`) enforced by validator and stamped
+  into experiment `component_versions`
+* `scripts/build_bm25_index.py` — indexes all 713 canonical chunks (no
+  hard-coded count; 21,406-term vocabulary)
+* `scripts/run_experiment.py --retriever {dense,bm25}` plus `--no-generation`
+  for fully offline retrieval-only runs
+* `scripts/compare_retrievers.py` — dense vs BM25 metrics table
+
+Validation:
+
+* 57 offline pytest tests pass (14 BM25 tests + 1 isolation guard added;
+  all Phase 1/2 tests green)
+* Architecture guards updated: `"bm25"` removed from forbidden tokens;
+  dense/BM25 isolation enforced; future-phase bans retained
+* BM25 baseline run persisted at `experiments/bm25_baseline_v1/`:
+  Recall@5 = 0.7167, MRR = 0.6771, retrieval latency mean 1.48 ms
+  (p50 1.30 ms, p95 2.39 ms), 0 retrieval failures over the 20-example
+  `dense_eval_v1` benchmark
+* Dense live baseline at `experiments/dense_baseline_v1/`: 20/20 traces `ok`,
+  Recall@5 = 0.8417, MRR = 0.95, retrieval latency mean 751.51 ms
+* Side-by-side comparison generated via `scripts/compare_retrievers.py`
+  (corpus version, trace count, and retrieval method all consistent)
+* Full results: `docs/phases/phase-3.md`
+
+Not implemented (future phases): hybrid/RRF, reranking, adaptive routing,
+query classification.
+
+---
+
+# Live Validation Status
+
+Phase 2 and Phase 3 live validation is now **complete**: credentials loaded
+from `.env`, providers verified, embeddings generated (713 chunks), Qdrant
+index built, dense baseline executed, BM25 baseline executed, and the
+side-by-side comparison generated.
+
+Sequence used:
 
 ```text
 check_providers.py
         ↓
-embed_chunks.py
+embed_chunks.py → build_index.py → run_experiment.py --retriever dense
         ↓
-build_index.py
+build_bm25_index.py → run_experiment.py --retriever bm25
         ↓
-run_experiment.py --name dense_baseline_v1
-        ↓
-ask.py
+compare_retrievers.py
 ```
 
-Live execution should confirm that the external embedding and generation
-providers work correctly with the implemented system.
+Notes from live execution:
+
+* Groq intermittently returned `429` during generation; the SDK's built-in
+  retry with backoff recovered on every call (0 generation failures).
+* The LLM judge initially failed on harder examples because `max_tokens=512`
+  left no room for the reasoning model's internal reasoning before the JSON
+  body; `evaluation/judge.py` now uses `max_tokens=4096`. Judge results are
+  cached in `storage/eval_cache.sqlite3`, so repeats are free.
 
 ---
 
 # Current Project State
 
-Phase 2 is considered complete as an implementation and offline-validation
-milestone.
+Phases 1–3 are complete as implementation, offline-validation, and live
+validation milestones. Both fixed retrieval baselines (dense and BM25) are
+established over the same canonical 713-chunk corpus, evaluated by the same
+strategy-agnostic pipeline, and compared side-by-side
+(`scripts/compare_retrievers.py`: dense MRR 0.95 vs BM25 MRR 0.6771;
+dense Recall@5 0.8417 vs BM25 0.7167; dense latency 751.51 ms vs BM25 1.48 ms).
 
 The next development phase is:
 
-> Phase 3 — BM25 Retrieval
+> Phase 4 — Hybrid Retrieval (e.g. Reciprocal Rank Fusion over dense + BM25)
 
-Phase 3 should establish a fixed lexical retrieval baseline while preserving
-the existing retrieval and evaluation architecture.
-
-Do not implement Phase 3+ functionality until the phase is explicitly started.
+Do not implement Phase 4+ functionality until the phase is explicitly started.

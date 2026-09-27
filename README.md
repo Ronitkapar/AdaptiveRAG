@@ -80,18 +80,20 @@ python3 scripts/validate_corpus.py --manifest-only
 .venv/bin/pytest -q
 ```
 
-43 offline tests cover schemas, config, ingestion, chunking, embeddings cache,
-indexing, retrieval, context, generation, evaluation, the experiment runner,
-determinism, and architecture guards. Live-provider checks live outside pytest:
-`.venv/bin/python scripts/check_providers.py` (needs `.env` keys).
+57 offline tests cover schemas, config, ingestion, chunking, embeddings cache,
+indexing, dense and BM25 retrieval, context, generation, evaluation, the
+experiment runner, determinism, and architecture guards. Live-provider checks
+live outside pytest: `.venv/bin/python scripts/check_providers.py` (needs
+`.env` keys).
 
 ---
 
 ## Phase 2: Fixed Dense-RAG Baseline
 
-Phase 2 establishes the controlled comparison point for all future retrieval strategies:
-**only** dense retrieval is implemented — no BM25, hybrid, reranking, adaptive routing,
-query classification, or frontend.
+Phase 2 established the controlled comparison point for all future retrieval
+strategies: at Phase 2 **only** dense retrieval was implemented — no hybrid,
+reranking, adaptive routing, query classification, or frontend. (BM25 was
+added later as Phase 3; see below.)
 
 ### Pipeline
 
@@ -152,5 +154,50 @@ AdaptiveRAG/
 - [x] retrieval (Recall/Precision/Hit/MRR/nDCG), generation (lexical F1/ROUGE-L + cached LLM judge),
       and efficiency (latency/tokens/estimated cost) metrics from traces only
 - [x] reproducible config (`config_hash` + `corpus_version`) + 43 offline tests + guards
-- [x] no BM25 / hybrid / rerank / adaptive code anywhere in `src/` (machine-checked)
-- [ ] live baseline run (`embed → index → run_experiment` needs `.env` keys — user step)
+- [x] at Phase 2 completion, no BM25 / hybrid / rerank / adaptive code in `src/`
+      (machine-checked; BM25 was added later in Phase 3, hybrid/rerank/adaptive
+      remain guard-banned)
+- [x] live baseline run (`embed → index → run_experiment` executed with `.env` keys)
+
+---
+
+## Phase 3: BM25 Lexical Baseline
+
+Phase 3 adds an independent lexical retrieval strategy over the **same**
+canonical 713-chunk corpus, sharing the retrieval protocol and the
+strategy-agnostic evaluation pipeline.
+
+### Pipeline
+
+```text
+713 chunks → BM25Index (inverted index, deterministic tokenizer)
+→ storage/bm25/bm25_index.json → BM25Retriever (k1=1.2, b=0.75)
+→ ContextBuilder → ExperimentRunner → Evaluators
+```
+
+### Reproduce the BM25 baseline (offline, no embedding credentials)
+
+```bash
+.venv/bin/python scripts/build_bm25_index.py          # → storage/bm25/bm25_index.json
+.venv/bin/python scripts/run_experiment.py --retriever bm25 --no-judge --no-generation
+.venv/bin/python scripts/compare_retrievers.py        # dense vs BM25 table (once both runs exist)
+```
+
+### Definition of Done
+
+- [x] indexes the canonical corpus without modification or hard-coded counts
+- [x] `BM25Retriever` conforms to the `Retriever` protocol; native BM25 scores,
+      1-indexed ranks, full metadata/provenance
+- [x] zero coupling with dense retrieval (guard-enforced); no fallback logic
+- [x] `retrieval_method` ⇔ `retriever_version` consistency without drift
+- [x] missing index fails fast; empty query → `InvalidQueryError`;
+      zero lexical match → `status="no_results"`
+- [x] evaluated on `dense_eval_v1` with Recall/Precision/Hit/MRR/nDCG@k +
+      latency (Recall@5 = 0.7167, MRR = 0.6771); run artifacts in
+      `experiments/bm25_baseline_v1/`
+- [x] live dense-vs-BM25 comparison over the same corpus/benchmark
+      (`scripts/compare_retrievers.py`: dense MRR 0.95 vs BM25 0.6771,
+      dense Recall@5 0.8417 vs BM25 0.7167, dense 751.51 ms vs BM25 1.48 ms)
+- [x] 57 offline tests pass; Phase 4+ still guard-banned
+- [x] docs updated (`docs/phases/phase-3.md`, `progress.md`, `decision.md`,
+      `architecture.md`)
