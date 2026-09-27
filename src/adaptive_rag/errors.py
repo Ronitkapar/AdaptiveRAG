@@ -70,12 +70,12 @@ class VectorStoreError(AdaptiveRAGError):
     """Base exception for vector store failures."""
 
 
-class IndexUnavailableError(VectorStoreError):
-    """Raised when the vector index cannot be connected to or loaded."""
+class IndexUnavailableError(AdaptiveRAGError):
+    """Raised when an index cannot be connected to or loaded."""
 
 
-class IndexConfigMismatchError(VectorStoreError):
-    """Raised when existing collection dimensions or metadata conflict with current config."""
+class IndexConfigMismatchError(AdaptiveRAGError):
+    """Raised when existing index dimensions or metadata conflict with current config."""
 
 
 # --- Retrieval Errors ---

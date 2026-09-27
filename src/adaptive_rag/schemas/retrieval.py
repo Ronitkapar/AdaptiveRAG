@@ -32,14 +32,18 @@ class RetrievalMetadata(BaseModel):
     score_threshold: float | None = None
     filters: dict[str, Any] | None = None
     retriever_version: str
-    embedding_model_id: str
-    embedding_dim: int
     index_id: str
-    collection: str
     corpus_version: str
     latency_ms: float
-    query_embedding_latency_ms: float
     search_latency_ms: float
+    # Vector / dense retrieval fields (optional for lexical retrievers)
+    embedding_model_id: str | None = None
+    embedding_dim: int | None = None
+    collection: str | None = None
+    query_embedding_latency_ms: float | None = None
+    # BM25 / lexical retrieval fields (optional for dense retrievers)
+    k1: float | None = None
+    b: float | None = None
 
 
 class RetrievalResponse(BaseModel):
@@ -49,6 +53,6 @@ class RetrievalResponse(BaseModel):
 
     query: str
     results: list[RetrievalResult] = Field(default_factory=list)
-    retrieval_method: Literal["dense"] = "dense"
+    retrieval_method: Literal["dense", "bm25"] = "dense"
     status: Literal["ok", "no_results"] = "ok"
     retrieval_metadata: RetrievalMetadata

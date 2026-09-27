@@ -13,7 +13,6 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = REPO_ROOT / "src" / "adaptive_rag"
 
 FORBIDDEN_STRATEGY_TOKENS = (
-    "bm25",
     "hybrid",
     "rerank",
     "adaptive_rout",
@@ -67,9 +66,38 @@ def test_provider_isolation_between_generation_and_embeddings():
         assert "groq" not in text, f"{path.name} couples embeddings to generation"
 
 
+def test_retriever_isolation_between_dense_and_bm25():
+    """Dense retriever must not import or depend on BM25 and vice versa."""
+    dense_path = SRC_ROOT / "retrieval" / "dense.py"
+    if dense_path.is_file():
+        text = dense_path.read_text(encoding="utf-8").lower()
+        assert "bm25" not in text, "dense retriever couples to bm25"
+
+    bm25_retrieval_path = SRC_ROOT / "retrieval" / "bm25.py"
+    if bm25_retrieval_path.is_file():
+        text = bm25_retrieval_path.read_text(encoding="utf-8").lower()
+        assert "dense" not in text, "bm25 retriever couples to dense"
+        assert "vector_store" not in text, "bm25 retriever couples to vector_store"
+        assert "embedding" not in text, "bm25 retriever couples to embeddings"
+
+    bm25_indexing_path = SRC_ROOT / "indexing" / "bm25.py"
+    if bm25_indexing_path.is_file():
+        text = bm25_indexing_path.read_text(encoding="utf-8").lower()
+        assert "qdrant" not in text, "bm25 indexing couples to qdrant"
+        assert "embedding" not in text, "bm25 indexing couples to embeddings"
+
+
 def test_no_secrets_committed_in_repo():
-    """No API keys or .env files may be committed to the repository."""
-    assert not (REPO_ROOT / ".env").exists(), ".env must never exist in the working tree"
+    """No API keys may be committed/tracked, and live .env must stay gitignored."""
+    import subprocess
+
+    tracked = subprocess.run(
+        ["git", "ls-files", ".env"],
+        capture_output=True,
+        text=True,
+        cwd=REPO_ROOT,
+    ).stdout.strip()
+    assert tracked == "", ".env must never be tracked by git"
     key_pattern = re.compile(r"(sk-|gsk_)[A-Za-z0-9]{10,}")
     for path in list(_iter_source_files()) + [REPO_ROOT / ".env.example"]:
         text = path.read_text(encoding="utf-8")

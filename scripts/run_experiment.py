@@ -1,8 +1,8 @@
 """
 scripts.run_experiment
 ----------------------
-CLI entrypoint for the Phase 2 fixed Dense-RAG baseline experiment.
-Builds the experiment configuration, instantiates components from .env settings,
+CLI entrypoint for fixed retrieval baseline experiments (dense or BM25).
+Builds the experiment configuration, instantiates components from settings,
 executes the dataset through ExperimentRunner, and persists trace artifacts.
 """
 
@@ -31,7 +31,14 @@ logger = logging.getLogger("run_experiment")
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Run the fixed Dense-RAG baseline experiment.")
+    parser = argparse.ArgumentParser(description="Run a fixed retrieval baseline experiment.")
+    parser.add_argument(
+        "--retriever",
+        type=str,
+        choices=["dense", "bm25"],
+        default="dense",
+        help="Retrieval strategy to evaluate",
+    )
     parser.add_argument(
         "--dataset",
         type=Path,
@@ -61,6 +68,11 @@ def main() -> int:
         help="Disable the LLM judge (lexical metrics only, fully offline)",
     )
     parser.add_argument(
+        "--no-generation",
+        action="store_true",
+        help="Skip answer generation (retrieval-only evaluation, fully offline)",
+    )
+    parser.add_argument(
         "--judge-model",
         type=str,
         default="openai/gpt-oss-20b",
@@ -79,7 +91,17 @@ def main() -> int:
 
         evaluation_kwargs["evaluation"] = EvaluationConfig(enable_llm_judge=False)
 
-    config = build_experiment_config(name=args.name, **evaluation_kwargs)
+    from adaptive_rag.schemas import RetrievalConfig
+
+    retrieval_kwargs = {"retrieval": RetrievalConfig(retrieval_method=args.retriever)}
+    if args.retriever == "bm25" and args.name == "dense_baseline_v1":
+        experiment_name = "bm25_baseline_v1"
+    else:
+        experiment_name = args.name
+
+    config = build_experiment_config(
+        name=experiment_name, **evaluation_kwargs, **retrieval_kwargs
+    )
     if args.no_judge is False and args.judge_model != config.evaluation.judge_model:
         config = config.model_copy(
             update={
@@ -89,9 +111,10 @@ def main() -> int:
             }
         )
     logger.info(
-        "Experiment config: name=%s corpus=%s top_k=%d judge=%s",
+        "Experiment config: name=%s corpus=%s retriever=%s top_k=%d judge=%s",
         config.name,
         config.corpus_version,
+        config.retrieval.retrieval_method,
         config.retrieval.top_k,
         config.evaluation.enable_llm_judge,
     )
@@ -99,7 +122,7 @@ def main() -> int:
     try:
         (
             embedding_model,
-            vector_store,
+            index_or_store,
             retriever,
             context_builder,
             generator,
@@ -110,22 +133,29 @@ def main() -> int:
         logger.error("Missing credentials: %s", exc)
         return 2
 
-    if vector_store.count() == 0:
-        logger.error(
-            "Vector store collection '%s' is empty. Run scripts/build_index.py first.",
-            config.index.collection_name,
-        )
+    is_bm25 = config.retrieval.retrieval_method == "bm25"
+    doc_count = index_or_store.total_docs if is_bm25 else index_or_store.count()
+    if doc_count == 0:
+        if is_bm25:
+            logger.error(
+                "BM25 index is empty. Run scripts/build_bm25_index.py first.",
+            )
+        else:
+            logger.error(
+                "Vector store collection '%s' is empty. Run scripts/build_index.py first.",
+                config.index.collection_name,
+            )
         return 1
 
     runner = ExperimentRunner(
         retriever=retriever,
-        generator=generator,
+        generator=None if args.no_generation else generator,
         context_builder=context_builder,
         evaluators=[
             RetrievalEvaluator(),
             GenerationEvaluator(
                 judge=None
-                if args.no_judge
+                if (args.no_judge or args.no_generation)
                 else GroqLLMJudge(model=args.judge_model, use_cache=True),
             ),
             EfficiencyEvaluator(generation_model=config.generation.model),
@@ -162,7 +192,8 @@ def main() -> int:
     )
     logger.info("Baseline headline — Recall@5: %s", retrieval_top5)
     try:
-        vector_store.close()
+        if hasattr(index_or_store, "close"):
+            index_or_store.close()
     except Exception:
         pass
     return 0

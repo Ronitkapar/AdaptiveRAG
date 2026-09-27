@@ -28,8 +28,10 @@ EVALUATION_DIR = DATA_DIR / "evaluation"
 STORAGE_DIR = REPO_ROOT / "storage"
 EMBEDDINGS_CACHE_DIR = STORAGE_DIR / "embeddings"
 QDRANT_DIR = STORAGE_DIR / "qdrant"
+BM25_INDEX_DIR = STORAGE_DIR / "bm25"
 EMBEDDINGS_CACHE_PATH = EMBEDDINGS_CACHE_DIR / "embeddings_cache.sqlite3"
 EVAL_CACHE_PATH = STORAGE_DIR / "eval_cache.sqlite3"
+BM25_INDEX_PATH = BM25_INDEX_DIR / "bm25_index.json"
 
 EXPERIMENTS_DIR = REPO_ROOT / "experiments"
 DOCS_DIR = REPO_ROOT / "docs"
@@ -46,6 +48,7 @@ def ensure_directories() -> None:
         EVALUATION_DIR,
         EMBEDDINGS_CACHE_DIR,
         QDRANT_DIR,
+        BM25_INDEX_DIR,
         EXPERIMENTS_DIR,
     ):
         path.mkdir(parents=True, exist_ok=True)

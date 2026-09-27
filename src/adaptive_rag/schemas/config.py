@@ -6,7 +6,7 @@ Leaf models with no downstream dependencies to avoid circular imports.
 """
 
 from typing import Any, Literal
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class IngestionConfig(BaseModel):
@@ -62,8 +62,8 @@ class IndexConfig(BaseModel):
     batch_size: int = 128
 
 
-class RetrievalConfig(BaseModel):
-    """Configuration for dense retrieval."""
+class DenseRetrievalConfig(BaseModel):
+    """Configuration specifically for dense vector retrieval."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -72,6 +72,44 @@ class RetrievalConfig(BaseModel):
     top_k: int = 10
     score_threshold: float | None = None
     filters: dict[str, Any] | None = None
+
+
+class BM25RetrievalConfig(BaseModel):
+    """Configuration specifically for BM25 lexical retrieval."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    retriever_version: str = "bm25_v1"
+    retrieval_method: Literal["bm25"] = "bm25"
+    k1: float = 1.2
+    b: float = 0.75
+    top_k: int = 10
+    score_threshold: float | None = None
+    filters: dict[str, Any] | None = None
+
+
+class RetrievalConfig(BaseModel):
+    """Configuration for retrieval (dense or bm25)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    retriever_version: str = "dense_v1"
+    retrieval_method: Literal["dense", "bm25"] = "dense"
+    top_k: int = 10
+    score_threshold: float | None = None
+    filters: dict[str, Any] | None = None
+    # BM25-specific parameters
+    k1: float = 1.2
+    b: float = 0.75
+
+    @model_validator(mode="after")
+    def validate_method_and_version(self) -> "RetrievalConfig":
+        if self.retrieval_method == "bm25" and self.retriever_version == "dense_v1":
+            # Auto-align default dense version to bm25 version
+            object.__setattr__(self, "retriever_version", "bm25_v1")
+        elif self.retrieval_method == "dense" and self.retriever_version == "bm25_v1":
+            object.__setattr__(self, "retriever_version", "dense_v1")
+        return self
 
 
 class ContextConfig(BaseModel):

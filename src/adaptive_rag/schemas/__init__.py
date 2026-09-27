@@ -4,8 +4,10 @@ schemas package initialization.
 
 from adaptive_rag.schemas.chunk import Chunk, ChunkingMetadata, ChunkMetadata, ChunkProvenance
 from adaptive_rag.schemas.config import (
+    BM25RetrievalConfig,
     ChunkingConfig,
     ContextConfig,
+    DenseRetrievalConfig,
     EmbeddingConfig,
     EvaluationConfig,
     GenerationConfig,
@@ -39,6 +41,7 @@ from adaptive_rag.schemas.generation import ContextChunk, GenerationRequest, Gen
 from adaptive_rag.schemas.retrieval import RetrievalMetadata, RetrievalResponse, RetrievalResult
 
 __all__ = [
+    "BM25RetrievalConfig",
     "Chunk",
     "ChunkMetadata",
     "ChunkProvenance",
@@ -46,6 +49,7 @@ __all__ = [
     "ChunkingMetadata",
     "ContextChunk",
     "ContextConfig",
+    "DenseRetrievalConfig",
     "Document",
     "DocumentMetadata",
     "Element",

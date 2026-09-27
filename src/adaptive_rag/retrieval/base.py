@@ -5,11 +5,12 @@ Retriever protocol definition.
 Keeps dense and future retrieval strategies cleanly interchangeable.
 """
 
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
 
 from adaptive_rag.schemas import RetrievalResponse
 
 
+@runtime_checkable
 class Retriever(Protocol):
     """Protocol for document retrievers."""
 

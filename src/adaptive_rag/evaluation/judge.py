@@ -149,7 +149,11 @@ class GroqLLMJudge:
                 {"role": "user", "content": prompt},
             ],
             temperature=0.0,
-            max_tokens=512,
+            # Reasoning models (gpt-oss) consume part of the completion budget on
+            # internal reasoning before emitting the JSON body; at 512 harder
+            # examples returned empty content and a provider-side 400. 4096 gives
+            # ample headroom for reasoning spikes while the JSON body is small.
+            max_tokens=4096,
             response_format={"type": "json_object"},
         )
 

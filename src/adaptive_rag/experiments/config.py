@@ -15,7 +15,9 @@ from adaptive_rag.embeddings.aicredits import AICreditsEmbeddingModel
 from adaptive_rag.generation.context import ContextBuilder
 from adaptive_rag.generation.groq import GroqGenerator
 from adaptive_rag.ingestion.pipeline import IngestionPipeline
+from adaptive_rag.indexing.bm25 import BM25Index
 from adaptive_rag.indexing.qdrant import QdrantVectorStore
+from adaptive_rag.retrieval.bm25 import BM25Retriever
 from adaptive_rag.retrieval.dense import DenseRetriever
 from adaptive_rag.schemas import (
     ChunkingConfig,
@@ -75,6 +77,10 @@ def build_experiment_config(
     corpus_version: str | None = None,
 ) -> ExperimentConfig:
     """Assemble a fully-specified, hash-stamped experiment configuration."""
+    active_retrieval = retrieval or RetrievalConfig()
+    comp_versions = dict(COMPONENT_VERSIONS)
+    comp_versions["retrieval"] = active_retrieval.retriever_version
+
     config = ExperimentConfig(
         experiment_id=experiment_id or name,
         name=name,
@@ -83,11 +89,11 @@ def build_experiment_config(
         chunking=chunking or ChunkingConfig(),
         embedding=embedding or EmbeddingConfig(),
         index=index or IndexConfig(),
-        retrieval=retrieval or RetrievalConfig(),
+        retrieval=active_retrieval,
         context=context or ContextConfig(),
         generation=generation or GenerationConfig(),
         evaluation=evaluation or EvaluationConfig(),
-        component_versions=dict(COMPONENT_VERSIONS),
+        component_versions=comp_versions,
         config_hash="pending",
     )
     # Hash everything except the hash field itself, then stamp it
@@ -103,10 +109,37 @@ def describe_component_versions() -> dict[str, str]:
 def instantiate_components(config: ExperimentConfig):
     """Build the runtime components described by an experiment configuration.
 
-    Returns (embedding_model, vector_store, retriever, context_builder, generator,
+    Returns (embedding_model, vector_store_or_index, retriever, context_builder, generator,
     chunker, ingestion_pipeline). Component construction is lazy where credentials
     are required.
     """
+    context_builder = ContextBuilder(
+        context_config=config.context, generation_config=config.generation
+    )
+    generator = GroqGenerator(config=config.generation)
+    chunker = StructureAwareChunker(config=config.chunking)
+    ingestion_pipeline = IngestionPipeline(config=config.ingestion)
+
+    if config.retrieval.retrieval_method == "bm25":
+        bm25_index = BM25Index.load(
+            expected_corpus_version=config.corpus_version,
+        )
+        retriever = BM25Retriever(
+            index=bm25_index,
+            config=config.retrieval,
+            corpus_version=config.corpus_version,
+            index_id="adaptiverag_bm25_v1",
+        )
+        return (
+            None,
+            bm25_index,
+            retriever,
+            context_builder,
+            generator,
+            chunker,
+            ingestion_pipeline,
+        )
+
     embedding_model = AICreditsEmbeddingModel(config=config.embedding)
     vector_store = QdrantVectorStore(config=config.index)
     retriever = DenseRetriever(
@@ -116,10 +149,6 @@ def instantiate_components(config: ExperimentConfig):
         corpus_version=config.corpus_version,
         index_id=config.index.collection_name,
     )
-    context_builder = ContextBuilder(config=config.context, generation_config=config.generation)
-    generator = GroqGenerator(config=config.generation)
-    chunker = StructureAwareChunker(config=config.chunking)
-    ingestion_pipeline = IngestionPipeline(config=config.ingestion)
     return (
         embedding_model,
         vector_store,
