@@ -27,9 +27,25 @@ force-add its `config.json`, `manifest.json`, and `metrics.json` explicitly.
 .venv/bin/python scripts/build_bm25_index.py
 .venv/bin/python scripts/run_experiment.py --retriever bm25 --no-judge --no-generation
 
+# Hybrid baseline — RRF over dense + BM25 (needs AICREDITS_API_KEY for query
+# embeddings, plus the persisted BM25 index; not offline-capable)
+.venv/bin/python scripts/run_experiment.py --retriever hybrid --no-judge --no-generation
+
 # Resume an interrupted run
 .venv/bin/python scripts/run_experiment.py --retriever bm25 --run-id <id> --resume
 
 # Compare dense vs BM25 metrics side-by-side (once both runs exist)
 .venv/bin/python scripts/compare_retrievers.py
+
+# Add a third column for a hybrid run (corpus version, trace count, and
+# retrieval method are checked across all three)
+.venv/bin/python scripts/compare_retrievers.py --hybrid-run experiments/<run-id>
 ```
+
+`--name` defaults to `<strategy>_baseline_v1`, so omitting it keeps each
+strategy in its own run directory. Pass `--name` to override.
+
+Hybrid requires **both** the Qdrant collection (`scripts/build_index.py`) and
+the BM25 index (`scripts/build_bm25_index.py`); the CLI checks both and names
+the missing one. A failing branch is recorded as `retrieval_failed` with the
+original error type — hybrid never silently degrades to a single strategy.

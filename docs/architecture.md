@@ -33,9 +33,10 @@ Reranking
 Adaptive Routing
 ```
 
-The current implementation has established the Dense-RAG baseline (Phase 2)
-and the BM25 lexical baseline (Phase 3). Both operate over the same canonical
-chunk corpus and share the same retrieval/evaluation contracts.
+The current implementation has established the Dense-RAG baseline (Phase 2),
+the BM25 lexical baseline (Phase 3), and the hybrid rank-fusion strategy
+(Phase 4). All three operate over the same canonical chunk corpus and share the
+same retrieval/evaluation contracts.
 
 Future retrieval strategies should reuse the existing retrieval and
 evaluation contracts wherever possible.
@@ -68,6 +69,56 @@ Guarantees:
   stays strategy-agnostic.
 * Scores are native BM25 values (unnormalized); provenance and metadata are
   preserved end-to-end.
+
+---
+
+# 3b. Phase 4 Hybrid Branch
+
+Phase 4 adds a composition layer above the two existing retrievers. It owns no
+index, no embedding model, and no tokenizer:
+
+```text
+        Canonical Chunk Corpus
+                 │
+       ┌─────────┴─────────┐
+       ▼                   ▼
+ DenseRetriever       BM25Retriever
+ (Qdrant, cosine)     (BM25Index, JSON)
+       │                   │
+       └─────────┬─────────┘
+                 ▼
+      reciprocal_rank_fusion(ranked_lists, rrf_k=60)
+                 ▼
+        truncate → top_k, renumber ranks 1..n
+                 ▼
+     RetrievalResponse(retrieval_method="hybrid")
+                 ▼
+      ExperimentRunner + evaluators (unchanged)
+```
+
+Guarantees:
+
+* **Composition, not reimplementation.** `hybrid.py` orchestrates; it contains
+  no tokenization, embedding, index access, or alternative fusion logic, and no
+  `try`/`except` (architecture-guard enforced on the AST).
+* **Rank-based fusion.** `score(chunk) = Σ_lists 1 / (rrf_k + rank)`. Cosine
+  similarity and BM25 magnitudes are never mixed, and no score normalization is
+  introduced.
+* **Deterministic output.** Deduplication is by `chunk_id`; ordering is
+  `(-rrf_score, best_single_source_rank, chunk_id)`, so nothing depends on
+  input or dict iteration order.
+* **Candidate depth.** Both branches are queried at `candidate_k` (default 20)
+  and truncation to `top_k` happens only after fusion.
+* **Fail closed.** Constituent exceptions propagate unchanged, so a broken
+  branch yields `status="retrieval_failed"` with the original error type —
+  never a silent dense-only or BM25-only answer.
+* **No third index.** Hybrid reuses the existing Qdrant collection and the
+  persisted BM25 index; there is no `storage/hybrid/` and no build script.
+  Because the dense branch embeds every query, a hybrid run requires
+  `AICREDITS_API_KEY` even with `--no-judge --no-generation`.
+
+`retrieval_method ∈ {"dense", "bm25", "hybrid"}` across configuration, traces,
+and manifests, with `retriever_version` aligned (`hybrid ⇔ hybrid_v1`).
 
 ---
 
@@ -320,7 +371,7 @@ Dense retrieval does not:
 * rerank
 * generate
 * perform BM25
-* perform hybrid retrieval
+* perform hybrid retrieval or rank fusion
 * perform adaptive routing
 
 ---
