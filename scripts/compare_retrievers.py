@@ -2,9 +2,12 @@
 """
 compare_retrievers.py
 ---------------------
-Compare dense vs BM25 baseline experiment metrics side-by-side.
-Reads run directories (config/manifest/traces/metrics) and prints
+Compare dense vs BM25 (and optionally hybrid) baseline experiment metrics
+side-by-side. Reads run directories (config/manifest/traces/metrics) and prints
 retrieval quality (Recall/Precision/Hit/MRR/nDCG) plus latency tables.
+
+The hybrid column is opt-in via --hybrid-run. When the flag is absent the output
+is byte-identical to the dense-vs-BM25-only table.
 """
 
 import argparse
@@ -60,6 +63,12 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Compare dense vs BM25 retrieval experiments.")
     parser.add_argument("--dense-run", type=Path, default=None)
     parser.add_argument("--bm25-run", type=Path, default=None)
+    parser.add_argument(
+        "--hybrid-run",
+        type=Path,
+        default=None,
+        help="Optional hybrid run directory; adds a third column when provided",
+    )
     parser.add_argument("--experiments-dir", type=Path, default=EXPERIMENTS_DIR)
     args = parser.parse_args()
 
@@ -73,6 +82,9 @@ def main() -> int:
 
     dense_dir = _resolve("dense_baseline", args.dense_run)
     bm25_dir = _resolve("bm25_baseline", args.bm25_run)
+    # Hybrid is never auto-discovered: the third column is opt-in, so omitting
+    # --hybrid-run must keep the dense-vs-BM25 table byte-identical.
+    hybrid_dir = args.hybrid_run
 
     if dense_dir is None or not (dense_dir / "metrics.json").is_file():
         logger.error("Dense run metrics not found (looked for *dense_baseline* runs).")
@@ -81,12 +93,21 @@ def main() -> int:
         logger.error("BM25 run metrics not found (looked for *bm25_baseline* runs).")
         return 1
 
+    use_hybrid = hybrid_dir is not None and (hybrid_dir / "metrics.json").is_file()
+    if args.hybrid_run is not None and not use_hybrid:
+        logger.error("Hybrid run metrics not found at %s.", hybrid_dir)
+        return 1
+
     dense = _load_metrics(dense_dir)
     bm25 = _load_metrics(bm25_dir)
     dense_manifest = _load_manifest(dense_dir)
     bm25_manifest = _load_manifest(bm25_dir)
+    hybrid = _load_metrics(hybrid_dir) if use_hybrid else None
+    hybrid_manifest = _load_manifest(hybrid_dir) if use_hybrid else {}
     logger.info("Dense run: %s (n=%s)", dense_dir, dense_manifest.get("trace_count"))
     logger.info("BM25 run:  %s (n=%s)", bm25_dir, bm25_manifest.get("trace_count"))
+    if use_hybrid:
+        logger.info("Hybrid run: %s (n=%s)", hybrid_dir, hybrid_manifest.get("trace_count"))
 
     # --- Run consistency: same corpus, same benchmark size, correct methods ---
     print("Run consistency:")
@@ -114,10 +135,57 @@ def main() -> int:
     if not methods_ok:
         mismatches.append("retrieval_method")
 
+    if use_hybrid:
+        corpus_hybrid = hybrid_manifest.get("corpus_version")
+        corpus_hybrid_ok = corpus_hybrid is not None and corpus_hybrid == corpus_dense
+        print(f"  corpus_version: hybrid={corpus_hybrid} "
+              f"{'MATCH' if corpus_hybrid_ok else 'MISMATCH'}")
+        if not corpus_hybrid_ok:
+            mismatches.append("corpus_version")
+
+        n_hybrid = hybrid_manifest.get("trace_count")
+        n_hybrid_ok = n_hybrid is not None and n_hybrid == n_dense
+        print(f"  trace_count:    hybrid={n_hybrid} {'MATCH' if n_hybrid_ok else 'MISMATCH'}")
+        if not n_hybrid_ok:
+            mismatches.append("trace_count")
+
+        method_hybrid = hybrid_manifest.get("retrieval_method")
+        method_hybrid_ok = method_hybrid == "hybrid"
+        print(f"  method:         hybrid={method_hybrid} "
+              f"{'OK' if method_hybrid_ok else 'UNEXPECTED'}")
+        if not method_hybrid_ok:
+            mismatches.append("retrieval_method")
+
     if mismatches:
         logger.error("Configuration/corpus mismatches detected: %s", mismatches)
         return 2
     print()
+
+    if use_hybrid:
+        header = (f"{'metric':<22}{'dense':>12}{'bm25':>12}{'hybrid':>12}"
+                  f"{'Δhyb-dense':>12}{'Δhyb-bm25':>12}")
+        print(header)
+        print("-" * len(header))
+        for name, k in _RETRIEVAL_ROWS:
+            d = dense.get((name, k))
+            b = bm25.get((name, k))
+            h = hybrid.get((name, k))
+            label = f"{name}@k={k}" if k is not None else name
+            if all(isinstance(v, (int, float)) for v in (d, b, h)):
+                print(f"{label:<22}{d:>12.4f}{b:>12.4f}{h:>12.4f}"
+                      f"{(h - d):>+12.4f}{(h - b):>+12.4f}")
+            else:
+                print(f"{label:<22}{str(d):>12}{str(b):>12}{str(h):>12}{'n/a':>12}{'n/a':>12}")
+        print()
+        print("Efficiency (lower is better):")
+        for name in _EFFICIENCY_ROWS:
+            d = dense.get((name, None))
+            b = bm25.get((name, None))
+            h = hybrid.get((name, None))
+            if all(isinstance(v, (int, float)) for v in (d, b, h)):
+                print(f"{name:<30}{d:>12.2f}{b:>12.2f}{h:>12.2f}"
+                      f"{(h - d):>+12.2f}{(h - b):>+12.2f}")
+        return 0
 
     header = f"{'metric':<22}{'dense':>12}{'bm25':>12}{'delta':>12}"
     print(header)

@@ -19,6 +19,7 @@ from adaptive_rag.indexing.bm25 import BM25Index
 from adaptive_rag.indexing.qdrant import QdrantVectorStore
 from adaptive_rag.retrieval.bm25 import BM25Retriever
 from adaptive_rag.retrieval.dense import DenseRetriever
+from adaptive_rag.retrieval.hybrid import HybridRetriever
 from adaptive_rag.schemas import (
     ChunkingConfig,
     ContextConfig,
@@ -133,6 +134,44 @@ def instantiate_components(config: ExperimentConfig):
         return (
             None,
             bm25_index,
+            retriever,
+            context_builder,
+            generator,
+            chunker,
+            ingestion_pipeline,
+        )
+
+    if config.retrieval.retrieval_method == "hybrid":
+        # Hybrid fuses rankings, so a score threshold is meaningless across the two
+        # branches: each constituent gets a threshold-free view of the config.
+        constituent_config = config.retrieval.model_copy(update={"score_threshold": None})
+        bm25_index = BM25Index.load(
+            expected_corpus_version=config.corpus_version,
+        )
+        embedding_model = AICreditsEmbeddingModel(config=config.embedding)
+        vector_store = QdrantVectorStore(config=config.index)
+        dense_retriever = DenseRetriever(
+            embedding_model=embedding_model,
+            vector_store=vector_store,
+            config=constituent_config,
+            corpus_version=config.corpus_version,
+            index_id=config.index.collection_name,
+        )
+        bm25_retriever = BM25Retriever(
+            index=bm25_index,
+            config=constituent_config,
+            corpus_version=config.corpus_version,
+            index_id="adaptiverag_bm25_v1",
+        )
+        retriever = HybridRetriever(
+            dense_retriever=dense_retriever,
+            bm25_retriever=bm25_retriever,
+            config=config.retrieval,
+            corpus_version=config.corpus_version,
+        )
+        return (
+            embedding_model,
+            vector_store,
             retriever,
             context_builder,
             generator,

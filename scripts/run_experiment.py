@@ -1,7 +1,7 @@
 """
 scripts.run_experiment
 ----------------------
-CLI entrypoint for fixed retrieval baseline experiments (dense or BM25).
+CLI entrypoint for fixed retrieval baseline experiments (dense, BM25, or hybrid).
 Builds the experiment configuration, instantiates components from settings,
 executes the dataset through ExperimentRunner, and persists trace artifacts.
 """
@@ -29,13 +29,21 @@ from adaptive_rag.experiments.runner import ExperimentRunner
 
 logger = logging.getLogger("run_experiment")
 
+# Default experiment name per retrieval strategy, used when --name is left at its
+# default so hybrid never lands in the dense run directory.
+DEFAULT_RUN_NAMES = {
+    "dense": "dense_baseline_v1",
+    "bm25": "bm25_baseline_v1",
+    "hybrid": "hybrid_baseline_v1",
+}
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run a fixed retrieval baseline experiment.")
     parser.add_argument(
         "--retriever",
         type=str,
-        choices=["dense", "bm25"],
+        choices=["dense", "bm25", "hybrid"],
         default="dense",
         help="Retrieval strategy to evaluate",
     )
@@ -48,8 +56,8 @@ def main() -> int:
     parser.add_argument(
         "--name",
         type=str,
-        default="dense_baseline_v1",
-        help="Experiment configuration name",
+        default=None,
+        help="Experiment configuration name (default: <strategy>_baseline_v1)",
     )
     parser.add_argument(
         "--run-id",
@@ -94,10 +102,15 @@ def main() -> int:
     from adaptive_rag.schemas import RetrievalConfig
 
     retrieval_kwargs = {"retrieval": RetrievalConfig(retrieval_method=args.retriever)}
-    if args.retriever == "bm25" and args.name == "dense_baseline_v1":
-        experiment_name = "bm25_baseline_v1"
-    else:
-        experiment_name = args.name
+    default_name = DEFAULT_RUN_NAMES[args.retriever]
+    # Historical default was "dense_baseline_v1"; keep the remap so a dense-named
+    # run never collects a non-dense strategy's traces.
+    requested_name = args.name if args.name is not None else default_name
+    experiment_name = (
+        default_name
+        if requested_name == "dense_baseline_v1" and args.retriever != "dense"
+        else requested_name
+    )
 
     config = build_experiment_config(
         name=experiment_name, **evaluation_kwargs, **retrieval_kwargs
@@ -133,7 +146,10 @@ def main() -> int:
         logger.error("Missing credentials: %s", exc)
         return 2
 
-    is_bm25 = config.retrieval.retrieval_method == "bm25"
+    method = config.retrieval.retrieval_method
+    is_bm25 = method == "bm25"
+    # Hybrid returns the dense vector store in this slot; its BM25 index is held
+    # by the composed retriever, so both sides are checked explicitly.
     doc_count = index_or_store.total_docs if is_bm25 else index_or_store.count()
     if doc_count == 0:
         if is_bm25:
@@ -146,6 +162,22 @@ def main() -> int:
                 config.index.collection_name,
             )
         return 1
+    if method == "hybrid":
+        if retriever.bm25_retriever.index.total_docs == 0:
+            logger.error(
+                "Hybrid retrieval needs both indexes, but the BM25 index is empty. "
+                "Run scripts/build_bm25_index.py first."
+            )
+            return 1
+        logger.info(
+            "Hybrid retrieval active: dense collection '%s' (%d points) + BM25 index "
+            "(%d docs), rrf_k=%d candidate_k=%d",
+            config.index.collection_name,
+            doc_count,
+            retriever.bm25_retriever.index.total_docs,
+            config.retrieval.rrf_k,
+            config.retrieval.candidate_k,
+        )
 
     runner = ExperimentRunner(
         retriever=retriever,
