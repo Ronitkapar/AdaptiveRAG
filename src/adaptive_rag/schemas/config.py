@@ -88,27 +88,51 @@ class BM25RetrievalConfig(BaseModel):
     filters: dict[str, Any] | None = None
 
 
+class HybridRetrievalConfig(BaseModel):
+    """Configuration specifically for hybrid dense + BM25 fusion retrieval."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    retriever_version: str = "hybrid_v1"
+    retrieval_method: Literal["hybrid"] = "hybrid"
+    rrf_k: int = 60
+    candidate_k: int = 20
+    top_k: int = 10
+    score_threshold: float | None = None
+    filters: dict[str, Any] | None = None
+
+
 class RetrievalConfig(BaseModel):
-    """Configuration for retrieval (dense or bm25)."""
+    """Configuration for retrieval (dense, bm25, or hybrid)."""
 
     model_config = ConfigDict(extra="forbid")
 
     retriever_version: str = "dense_v1"
-    retrieval_method: Literal["dense", "bm25"] = "dense"
+    retrieval_method: Literal["dense", "bm25", "hybrid"] = "dense"
     top_k: int = 10
     score_threshold: float | None = None
     filters: dict[str, Any] | None = None
     # BM25-specific parameters
     k1: float = 1.2
     b: float = 0.75
+    # Hybrid / RRF-specific parameters
+    rrf_k: int = 60
+    candidate_k: int = 20
 
     @model_validator(mode="after")
     def validate_method_and_version(self) -> "RetrievalConfig":
-        if self.retrieval_method == "bm25" and self.retriever_version == "dense_v1":
-            # Auto-align default dense version to bm25 version
-            object.__setattr__(self, "retriever_version", "bm25_v1")
-        elif self.retrieval_method == "dense" and self.retriever_version == "bm25_v1":
-            object.__setattr__(self, "retriever_version", "dense_v1")
+        default_version = {
+            "dense": "dense_v1",
+            "bm25": "bm25_v1",
+            "hybrid": "hybrid_v1",
+        }
+        if self.retriever_version in default_version.values():
+            # Auto-align a default strategy version to the active retrieval method
+            object.__setattr__(
+                self, "retriever_version", default_version[self.retrieval_method]
+            )
+        if self.retrieval_method == "hybrid" and self.candidate_k < self.top_k:
+            raise ValueError("hybrid candidate_k must be >= top_k")
         return self
 
 

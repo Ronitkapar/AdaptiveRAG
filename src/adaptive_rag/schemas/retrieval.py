@@ -44,6 +44,15 @@ class RetrievalMetadata(BaseModel):
     # BM25 / lexical retrieval fields (optional for dense retrievers)
     k1: float | None = None
     b: float | None = None
+    # Hybrid / fusion fields (optional for single-strategy retrievers)
+    fusion_method: str | None = None
+    rrf_k: int | None = None
+    candidate_k: int | None = None
+    dense_candidate_count: int | None = None
+    bm25_candidate_count: int | None = None
+    dense_latency_ms: float | None = None
+    bm25_latency_ms: float | None = None
+    fusion_latency_ms: float | None = None
 
 
 class RetrievalResponse(BaseModel):
@@ -53,6 +62,6 @@ class RetrievalResponse(BaseModel):
 
     query: str
     results: list[RetrievalResult] = Field(default_factory=list)
-    retrieval_method: Literal["dense", "bm25"] = "dense"
+    retrieval_method: Literal["dense", "bm25", "hybrid"] = "dense"
     status: Literal["ok", "no_results"] = "ok"
     retrieval_metadata: RetrievalMetadata
