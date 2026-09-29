@@ -6,13 +6,14 @@ strategies, no LangChain/LlamaIndex core dependencies, and no secrets in repo.
 """
 
 from pathlib import Path
+import ast
 import re
 import tomllib
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = REPO_ROOT / "src" / "adaptive_rag"
 
-# Phase 4 (hybrid/RRF) is being introduced; Phase 5+ tokens remain banned.
+# Phase 4 (hybrid/RRF) is implemented; Phase 5+ tokens remain banned.
 FORBIDDEN_STRATEGY_TOKENS = (
     "rerank",
     "adaptive_rout",
@@ -20,6 +21,20 @@ FORBIDDEN_STRATEGY_TOKENS = (
     "strategy_select",
 )
 FORBIDDEN_HEAVY_DEPS = ("langchain", "llama-index", "llama_index", "sentence-transformers")
+
+# Tokens that would mean hybrid.py reimplements a strategy it must only compose.
+FORBIDDEN_HYBRID_TOKENS = (
+    "rerank",
+    "router",
+    "route",
+    "adaptive",
+    "comb_sum",
+    "comb_mnz",
+    "weighted",
+    "qdrant",
+    "tokenize",
+    "idf",
+)
 
 
 def _iter_source_files():
@@ -85,6 +100,32 @@ def test_retriever_isolation_between_dense_and_bm25():
         text = bm25_indexing_path.read_text(encoding="utf-8").lower()
         assert "qdrant" not in text, "bm25 indexing couples to qdrant"
         assert "embedding" not in text, "bm25 indexing couples to embeddings"
+
+
+def _strip_package_prefix(text: str) -> str:
+    """Drop `adaptive_rag` import paths so package naming never trips a token guard."""
+    return text.replace("adaptive_rag", "")
+
+
+def test_hybrid_composes_existing_retrievers():
+    """Hybrid must only orchestrate dense + BM25; it must not reimplement anything."""
+    hybrid_path = SRC_ROOT / "retrieval" / "hybrid.py"
+    if not hybrid_path.is_file():
+        return
+    text = _strip_package_prefix(hybrid_path.read_text(encoding="utf-8").lower())
+    for token in FORBIDDEN_HYBRID_TOKENS:
+        assert token not in text, f"hybrid retriever leaks strategy logic: {token}"
+
+    # Constituent failures must propagate untouched: no silent dense/BM25 fallback.
+    tree = ast.parse(hybrid_path.read_text(encoding="utf-8"))
+    try_nodes = [n for n in ast.walk(tree) if isinstance(n, ast.Try)]
+    assert not try_nodes, "hybrid retriever swallows constituent failures"
+
+    fusion_path = SRC_ROOT / "retrieval" / "fusion.py"
+    if fusion_path.is_file():
+        fusion_text = _strip_package_prefix(fusion_path.read_text(encoding="utf-8").lower())
+        for token in ("dense", "bm25", "qdrant", "tokenize"):
+            assert token not in fusion_text, f"RRF fusion couples to {token}"
 
 
 def test_no_secrets_committed_in_repo():
