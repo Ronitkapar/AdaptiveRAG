@@ -1,7 +1,7 @@
 """
 tests.test_architecture_guards
 ------------------------------
-Guards that keep the Phase 2 dense baseline honest: no premature retrieval
+Guards that keep the implemented phases honest: no premature retrieval
 strategies, no LangChain/LlamaIndex core dependencies, and no secrets in repo.
 """
 
@@ -12,8 +12,8 @@ import tomllib
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = REPO_ROOT / "src" / "adaptive_rag"
 
+# Phase 4 (hybrid/RRF) is being introduced; Phase 5+ tokens remain banned.
 FORBIDDEN_STRATEGY_TOKENS = (
-    "hybrid",
     "rerank",
     "adaptive_rout",
     "query_classif",
@@ -27,7 +27,7 @@ def _iter_source_files():
 
 
 def test_no_future_strategy_symbols_in_source():
-    """BM25 / hybrid / rerank / adaptive symbols must not exist anywhere in src."""
+    """Rerank / adaptive-routing symbols must not exist anywhere in src."""
     violations: list[str] = []
     for path in _iter_source_files():
         text = path.read_text(encoding="utf-8").lower()
