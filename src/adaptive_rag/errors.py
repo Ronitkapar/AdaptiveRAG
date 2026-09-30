@@ -89,6 +89,21 @@ class InvalidQueryError(RetrievalError):
     """Raised when a query is empty or violates retrieval preconditions."""
 
 
+# --- Second-Stage Scoring Errors ---
+
+
+class RerankingError(AdaptiveRAGError):
+    """Base exception for second-stage scoring failures."""
+
+
+class RerankerModelError(RerankingError):
+    """Raised when the reranker model artifact is missing, incomplete, or undecodable."""
+
+
+class RerankerUnavailableError(RerankingError):
+    """Raised when no usable reranker execution provider is available."""
+
+
 # --- Generation Errors ---
 
 

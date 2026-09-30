@@ -21,6 +21,10 @@ class RetrievalResult(BaseModel):
     rank: int
     metadata: ChunkMetadata
     provenance: ChunkProvenance
+    # Second-stage scoring provenance: `score` holds the rerank score when the
+    # result was reordered, and these keep the first-stage signal intact.
+    retrieval_score: float | None = None
+    retrieval_rank: int | None = None
 
 
 class RetrievalMetadata(BaseModel):
@@ -53,6 +57,18 @@ class RetrievalMetadata(BaseModel):
     dense_latency_ms: float | None = None
     bm25_latency_ms: float | None = None
     fusion_latency_ms: float | None = None
+    # Second-stage scoring fields (optional when no second stage runs)
+    rerank_enabled: bool | None = None
+    reranker_version: str | None = None
+    reranker_model_id: str | None = None
+    reranker_device: str | None = None
+    rerank_candidate_k: int | None = None
+    rerank_top_k: int | None = None
+    candidate_generation_latency_ms: float | None = None
+    rerank_latency_ms: float | None = None
+    candidate_count: int | None = None
+    result_count: int | None = None
+    rerank_fallback: bool | None = None
 
 
 class RetrievalResponse(BaseModel):
@@ -62,6 +78,13 @@ class RetrievalResponse(BaseModel):
 
     query: str
     results: list[RetrievalResult] = Field(default_factory=list)
-    retrieval_method: Literal["dense", "bm25", "hybrid"] = "dense"
+    retrieval_method: Literal[
+        "dense",
+        "bm25",
+        "hybrid",
+        "dense_rerank",
+        "bm25_rerank",
+        "hybrid_rerank",
+    ] = "dense"
     status: Literal["ok", "no_results"] = "ok"
     retrieval_metadata: RetrievalMetadata

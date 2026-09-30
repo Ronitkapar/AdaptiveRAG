@@ -14,6 +14,7 @@ from adaptive_rag.schemas.config import (
     HybridRetrievalConfig,
     IndexConfig,
     IngestionConfig,
+    RerankerConfig,
     RetrievalConfig,
 )
 from adaptive_rag.schemas.document import (
@@ -75,6 +76,7 @@ __all__ = [
     "Page",
     "Provenance",
     "ReferenceInfo",
+    "RerankerConfig",
     "RetrievalConfig",
     "RetrievalMetadata",
     "RetrievalResponse",
