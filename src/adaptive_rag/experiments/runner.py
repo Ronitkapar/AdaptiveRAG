@@ -164,6 +164,14 @@ class ExperimentRunner:
             )
             trace.retrieval = retrieval
             trace.retrieval_latency_ms = retrieval.retrieval_metadata.latency_ms
+            meta = retrieval.retrieval_metadata
+            # Second-stage cost is only present on reranked runs; copying it here
+            # keeps the trace flat and strategy-agnostic.
+            trace.candidate_generation_latency_ms = meta.candidate_generation_latency_ms
+            trace.rerank_latency_ms = meta.rerank_latency_ms
+            trace.rerank_candidate_count = meta.candidate_count
+            trace.rerank_result_count = meta.result_count
+            trace.rerank_fallback = meta.rerank_fallback
         except Exception as exc:
             trace.status = "retrieval_failed"
             trace.error = ErrorInfo(

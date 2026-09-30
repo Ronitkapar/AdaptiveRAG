@@ -47,6 +47,24 @@ class EfficiencyEvaluator(Evaluator):
         ]
         total_latencies = [t.total_latency_ms for t in traces if t.total_latency_ms is not None]
 
+        candidate_latencies = [
+            t.candidate_generation_latency_ms
+            for t in traces
+            if t.candidate_generation_latency_ms is not None
+        ]
+        rerank_latencies = [
+            t.rerank_latency_ms for t in traces if t.rerank_latency_ms is not None
+        ]
+        candidate_counts = [
+            t.rerank_candidate_count
+            for t in traces
+            if t.rerank_candidate_count is not None
+        ]
+        result_counts = [
+            t.rerank_result_count for t in traces if t.rerank_result_count is not None
+        ]
+        fallbacks = [t.rerank_fallback for t in traces if t.rerank_fallback is not None]
+
         input_tokens = sum(t.usage.input_tokens for t in traces if t.usage is not None)
         output_tokens = sum(t.usage.output_tokens for t in traces if t.usage is not None)
         total_tokens = sum(t.usage.total_tokens for t in traces if t.usage is not None)
@@ -133,6 +151,69 @@ class EfficiencyEvaluator(Evaluator):
                 version=self.version,
             ),
         ]
+
+        # Second-stage metrics are appended only when at least one trace carries
+        # them, so a non-reranked run's efficiency report is unchanged.
+        if candidate_latencies or rerank_latencies:
+            metrics.extend(
+                [
+                    metric(
+                        "candidate_generation_latency_ms_mean",
+                        mean(candidate_latencies),
+                        n=len(candidate_latencies),
+                        version=self.version,
+                    ),
+                    metric(
+                        "candidate_generation_latency_ms_p50",
+                        percentile(candidate_latencies, 50),
+                        n=len(candidate_latencies),
+                        version=self.version,
+                    ),
+                    metric(
+                        "candidate_generation_latency_ms_p95",
+                        percentile(candidate_latencies, 95),
+                        n=len(candidate_latencies),
+                        version=self.version,
+                    ),
+                    metric(
+                        "rerank_latency_ms_mean",
+                        mean(rerank_latencies),
+                        n=len(rerank_latencies),
+                        version=self.version,
+                    ),
+                    metric(
+                        "rerank_latency_ms_p50",
+                        percentile(rerank_latencies, 50),
+                        n=len(rerank_latencies),
+                        version=self.version,
+                    ),
+                    metric(
+                        "rerank_latency_ms_p95",
+                        percentile(rerank_latencies, 95),
+                        n=len(rerank_latencies),
+                        version=self.version,
+                    ),
+                    metric(
+                        "rerank_candidate_count_mean",
+                        mean(candidate_counts),
+                        n=len(candidate_counts),
+                        version=self.version,
+                    ),
+                    metric(
+                        "rerank_result_count_mean",
+                        mean(result_counts),
+                        n=len(result_counts),
+                        version=self.version,
+                    ),
+                    metric(
+                        "rerank_fallback_count",
+                        float(sum(1 for f in fallbacks if f)),
+                        n=len(fallbacks),
+                        version=self.version,
+                        notes="queries returned un-reranked under the opt-in fallback",
+                    ),
+                ]
+            )
 
         aggregates: dict[str, Any] = {
             "generation_model": self.generation_model,
