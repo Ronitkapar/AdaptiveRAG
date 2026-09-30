@@ -87,11 +87,22 @@ class OnnxCrossEncoderReranker:
                     "huggingface-hub is required to download the reranker artifact"
                 ) from exc
             logger.info("Downloading reranker artifact %s to %s", self.model_id, target)
-            snapshot_download(
-                repo_id=self.model_id,
-                revision=self.model_revision,
-                local_dir=str(target),
-            )
+            try:
+                snapshot_download(
+                    repo_id=self.model_id,
+                    revision=self.model_revision,
+                    local_dir=str(target),
+                )
+            except RerankerModelError:
+                raise
+            except Exception as exc:
+                # A missing repo, a 401/404, or a network fault must surface as the
+                # project's own typed error rather than leaking a transport-specific
+                # exception through the Reranker contract.
+                raise RerankerModelError(
+                    f"failed to download reranker artifact {self.model_id!r} "
+                    f"into {target}: {type(exc).__name__}: {exc}"
+                ) from exc
             missing = [name for name in REQUIRED_FILES if not (target / name).is_file()]
             if missing:
                 raise RerankerModelError(

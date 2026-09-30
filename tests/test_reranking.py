@@ -1105,8 +1105,14 @@ def test_onnx_cross_encoder_backend_runs(tmp_path: Path):
     one_at_a_time = build(1).score("what does BM25 do?", passages)
     assert one_at_a_time == pytest.approx(scores, abs=1e-5)
 
-    # The BM25 passage must beat the unrelated fusion passage.
-    assert scores[passages.index("BM25 is a bag-of-words ranking function.")] > scores[0] * 0
+    # The BM25 passage must outrank the unrelated fusion passage.
+    # NOTE: this model's head is a single raw regression logit whose scale is
+    # entirely negative for non-matches, so the comparison is between two scored
+    # passages. Asserting against 0.0 (or against scores[0] * 0) would compare a
+    # score with itself plus a zero baseline and never actually rank anything.
+    bm25_score = scores[passages.index("BM25 is a bag-of-words ranking function.")]
+    fusion_score = scores[passages.index("Reciprocal rank fusion merges ranked lists.")]
+    assert bm25_score > fusion_score
 
 
 @pytest.mark.integration
