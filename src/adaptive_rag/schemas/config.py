@@ -102,13 +102,36 @@ class HybridRetrievalConfig(BaseModel):
     filters: dict[str, Any] | None = None
 
 
+class RerankerConfig(BaseModel):
+    """Configuration specifically for second-stage cross-encoder reranking."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    reranker_version: str = "onnx_cross_encoder_v1"
+    model_id: str = "Xenova/ms-marco-MiniLM-L-6-v2"
+    model_revision: str | None = None
+    device: Literal["auto", "cpu", "cuda"] = "auto"
+    batch_size: int = 16
+    max_length: int = 512
+    candidate_k: int = 20
+    top_k: int = 10
+    fallback_to_retrieval: bool = False
+
+
 class RetrievalConfig(BaseModel):
-    """Configuration for retrieval (dense, bm25, or hybrid)."""
+    """Configuration for retrieval (dense, bm25, hybrid, or a reranked variant)."""
 
     model_config = ConfigDict(extra="forbid")
 
     retriever_version: str = "dense_v1"
-    retrieval_method: Literal["dense", "bm25", "hybrid"] = "dense"
+    retrieval_method: Literal[
+        "dense",
+        "bm25",
+        "hybrid",
+        "dense_rerank",
+        "bm25_rerank",
+        "hybrid_rerank",
+    ] = "dense"
     top_k: int = 10
     score_threshold: float | None = None
     filters: dict[str, Any] | None = None
@@ -118,6 +141,15 @@ class RetrievalConfig(BaseModel):
     # Hybrid / RRF-specific parameters
     rrf_k: int = 60
     candidate_k: int = 20
+    # Second-stage cross-encoder parameters (ignored unless rerank_enabled)
+    rerank_enabled: bool = False
+    rerank_model_id: str = "Xenova/ms-marco-MiniLM-L-6-v2"
+    rerank_model_revision: str | None = None
+    rerank_device: Literal["auto", "cpu", "cuda"] = "auto"
+    rerank_batch_size: int = 16
+    rerank_max_length: int = 512
+    rerank_candidate_k: int = 20
+    rerank_fallback: bool = False
 
     @model_validator(mode="after")
     def validate_method_and_version(self) -> "RetrievalConfig":
@@ -125,6 +157,9 @@ class RetrievalConfig(BaseModel):
             "dense": "dense_v1",
             "bm25": "bm25_v1",
             "hybrid": "hybrid_v1",
+            "dense_rerank": "dense_rerank_v1",
+            "bm25_rerank": "bm25_rerank_v1",
+            "hybrid_rerank": "hybrid_rerank_v1",
         }
         if self.retriever_version in default_version.values():
             # Auto-align a default strategy version to the active retrieval method
@@ -133,6 +168,15 @@ class RetrievalConfig(BaseModel):
             )
         if self.retrieval_method == "hybrid" and self.candidate_k < self.top_k:
             raise ValueError("hybrid candidate_k must be >= top_k")
+        if self.rerank_enabled:
+            if self.rerank_candidate_k < self.top_k:
+                raise ValueError("rerank_candidate_k must be >= top_k")
+            if self.retrieval_method == "hybrid_rerank" and (
+                self.candidate_k < self.rerank_candidate_k
+            ):
+                raise ValueError(
+                    "hybrid_rerank candidate_k must be >= rerank_candidate_k"
+                )
         return self
 
 

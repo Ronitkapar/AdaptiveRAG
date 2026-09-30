@@ -95,6 +95,12 @@ class ExperimentTrace(BaseModel):
     retrieval_latency_ms: float | None = None
     generation_latency_ms: float | None = None
     total_latency_ms: float | None = None
+    # Second-stage scoring split (absent on non-reranked runs)
+    candidate_generation_latency_ms: float | None = None
+    rerank_latency_ms: float | None = None
+    rerank_candidate_count: int | None = None
+    rerank_result_count: int | None = None
+    rerank_fallback: bool | None = None
     usage: TokenUsage | None = None
     estimated_cost_usd: float | None = None
     error: ErrorInfo | None = None

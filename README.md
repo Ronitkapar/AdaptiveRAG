@@ -201,3 +201,110 @@ strategy-agnostic evaluation pipeline.
 - [x] 57 offline tests pass; Phase 4+ still guard-banned
 - [x] docs updated (`docs/phases/phase-3.md`, `progress.md`, `decision.md`,
       `architecture.md`)
+
+---
+
+## Phase 5: Reranking (Second-Stage Cross-Encoder)
+
+Phase 5 adds a second stage that re-scores the candidate list produced by any
+first-stage retriever. It reorders what retrieval already found — it never
+reimplements candidate generation, and it never decides *whether* to run (that
+is Phase 6's decision).
+
+### Pipeline
+
+```text
+DenseRetriever | BM25Retriever | HybridRetriever      (all unchanged)
+        ↓  ≤ N candidates (rerank_candidate_k, default 20)
+RerankedRetriever
+  └─ OnnxCrossEncoderReranker (ONNX Runtime, Xenova/ms-marco-MiniLM-L-6-v2)
+        ↓  sort (-rerank_score, retrieval_rank, chunk_id) → truncate → rank = 1..n
+RetrievalResponse(retrieval_method="<base>_rerank")
+        ↓
+ExperimentRunner + evaluators (unchanged; efficiency gains a conditional
+candidate-generation / rerank latency split)
+```
+
+### Reproduce the reranked baselines
+
+```bash
+# Confirm the ONNX artifact resolves before spending a benchmark run
+.venv/bin/pytest -m integration tests/test_reranking.py
+
+# Reranked runs (retrieval-only). dense/hybrid need AICREDITS_API_KEY for query
+# embeddings; bm25_rerank needs no credentials. All reranked runs need network
+# on first use to download the artifact.
+.venv/bin/python scripts/run_experiment.py --retriever dense  --rerank --name dense_rerank_v1  --no-judge --no-generation
+.venv/bin/python scripts/run_experiment.py --retriever bm25   --rerank --name bm25_rerank_v1   --no-judge --no-generation
+.venv/bin/python scripts/run_experiment.py --retriever hybrid --rerank --name hybrid_rerank_v1 --no-judge --no-generation
+
+# Candidate-depth ablation, top_k held at 10
+for k in 10 20 40; do
+  .venv/bin/python scripts/run_experiment.py --retriever hybrid --rerank \
+      --rerank-candidate-k $k --name hybrid_rerank_k${k}_v1 --no-judge --no-generation
+done
+
+# Compare each baseline against its reranked variant + the depth table
+.venv/bin/python scripts/compare_reranking.py \
+    --dense-run experiments/<dense_baseline_v1> \
+    --dense-rerank-run experiments/<id-dense_rerank_v1>
+```
+
+Overrides: `--reranker-model`, `--reranker-revision` (pin it — recorded in
+`config.json`), `--rerank-candidate-k`, `--rerank-device {auto,cpu,cuda}`,
+`--rerank-batch-size`, `--rerank-max-length`, `--rerank-fallback`.
+
+### Definition of Done
+
+- [x] `RerankedRetriever` composes any base `Retriever`;
+      `dense.py` / `bm25.py` / `hybrid.py` / `fusion.py` unmodified and
+      guard-enforced
+- [x] real cross-encoder on ONNX Runtime — no torch, no transformers;
+      `sentence-transformers` still banned
+- [x] `score` = rerank score; `retrieval_score` / `retrieval_rank` preserve the
+      first-stage signal. Scores are never mixed or normalized
+- [x] deterministic ordering `(-rerank_score, retrieval_rank, chunk_id)` and
+      batch-size invariance
+- [x] fail-closed by default; the single `except` is gated on
+      `rerank_fallback` and AST-guarded, and when taken it is visible in every
+      trace and metric
+- [x] empty candidate pool → `no_results` with no model invocation
+- [x] `retrieval_method` ⇔ `retriever_version` for all three `_rerank` variants;
+      every `rerank_*` field inside the hashed config
+- [x] retrieval metrics consumed unchanged; efficiency split additive and
+      conditional, so baseline artifacts are byte-identical
+- [x] 136 offline tests pass (2 `integration` deselected), including four new
+      architecture guards verified to fail against broken variants; the 2
+      integration-marked ONNX tests also pass against a real session
+- [x] docs updated (`docs/phases/phase-5.md`, `progress.md`, `decision.md`
+      ADR-020, `architecture.md`, `experiments/README.md`)
+- [x] **live benchmark** — six primary configurations plus the 10/20/40 depth
+      ablation executed on a networked host and recorded **as observed**
+
+### Measured result
+
+On this corpus **reranking did not pay for itself**, and the pre-registered
+latency estimate was wrong by two orders of magnitude. Retrieval-only,
+20-example benchmark, CPU, corpus `corpus_6c416f423920385d`:
+
+| Strategy | R@1 | R@5 | R@10 | MRR | retr. lat (ms) | rerank (ms) |
+| --- | --- | --- | --- | --- | --- | --- |
+| dense | 0.8417 | 0.8417 | 0.8583 | 0.9500 | 621.35 | — |
+| dense_rerank | 0.6917 | 0.8583 | 0.8750 | 0.8667 | 7708.96 | 6826.99 |
+| bm25 | 0.5417 | 0.7167 | 0.7833 | 0.6771 | 1.71 | — |
+| bm25_rerank | 0.4667 | 0.6583 | 0.8083 | 0.6162 | 4014.21 | 4010.40 |
+| hybrid | 0.6417 | 0.8583 | 0.8750 | 0.8200 | 721.00 | — |
+| hybrid_rerank | 0.4667 | 0.7583 | 0.8750 | 0.6926 | 4447.68 | 3487.09 |
+
+Recall@10 improved or held on all three strategies, but every head metric fell on
+all three (MRR -0.0833 / -0.0609 / -0.1274). Depth ablation: R@5 falls
+0.7917 → 0.7583 → 0.7333 for k = 10 / 20 / 40 while rerank latency climbs
+3.00 s → 3.49 s → 7.67 s, so `k=10` is both cheapest and most accurate.
+Measured cost is ~155 ms per candidate pair, not the predicted tens of
+milliseconds. Likely cause is domain mismatch — a general-web MS-MARCO
+cross-encoder scoring dense academic RAG prose — which is a finding about the
+model choice, not the composition-layer design. Full tables, per-run provenance,
+and the three latent defects the live test surfaced are in
+`docs/phases/phase-5.md` §8 and §9.
+
+Full record: [`docs/phases/phase-5.md`](docs/phases/phase-5.md).

@@ -35,6 +35,9 @@ DEFAULT_RUN_NAMES = {
     "dense": "dense_baseline_v1",
     "bm25": "bm25_baseline_v1",
     "hybrid": "hybrid_baseline_v1",
+    "dense_rerank": "dense_rerank_v1",
+    "bm25_rerank": "bm25_rerank_v1",
+    "hybrid_rerank": "hybrid_rerank_v1",
 }
 
 
@@ -86,6 +89,54 @@ def main() -> int:
         default="openai/gpt-oss-20b",
         help="Groq model id for the LLM judge",
     )
+    parser.add_argument(
+        "--rerank",
+        action="store_true",
+        help="Add a second-stage cross-encoder over the first-stage candidates",
+    )
+    parser.add_argument(
+        "--reranker-model",
+        type=str,
+        default=None,
+        help="Cross-encoder model id for --rerank",
+    )
+    parser.add_argument(
+        "--reranker-revision",
+        type=str,
+        default=None,
+        help="Pinned model revision for reproducibility (recorded in config.json)",
+    )
+    parser.add_argument(
+        "--rerank-candidate-k",
+        type=int,
+        default=None,
+        help="First-stage candidate depth fed to the reranker (default 20)",
+    )
+    parser.add_argument(
+        "--rerank-device",
+        type=str,
+        choices=["auto", "cpu", "cuda"],
+        default=None,
+        help="Execution provider selection for --rerank (default auto)",
+    )
+    parser.add_argument(
+        "--rerank-batch-size",
+        type=int,
+        default=None,
+        help="Scoring batch size for --rerank (default 16)",
+    )
+    parser.add_argument(
+        "--rerank-max-length",
+        type=int,
+        default=None,
+        help="Tokenizer truncation length for --rerank (default 512)",
+    )
+    parser.add_argument(
+        "--rerank-fallback",
+        action="store_true",
+        help="Return un-reranked candidates when the reranker fails (opt-in, "
+        "visible as rerank_fallback in every trace)",
+    )
     args = parser.parse_args()
 
     setup_logging()
@@ -101,14 +152,37 @@ def main() -> int:
 
     from adaptive_rag.schemas import RetrievalConfig
 
-    retrieval_kwargs = {"retrieval": RetrievalConfig(retrieval_method=args.retriever)}
-    default_name = DEFAULT_RUN_NAMES[args.retriever]
+    method = f"{args.retriever}_rerank" if args.rerank else args.retriever
+    retrieval_fields: dict = {"retrieval_method": method}
+    if args.rerank:
+        retrieval_fields["rerank_enabled"] = True
+        if args.reranker_model is not None:
+            retrieval_fields["rerank_model_id"] = args.reranker_model
+        if args.reranker_revision is not None:
+            retrieval_fields["rerank_model_revision"] = args.reranker_revision
+        if args.rerank_candidate_k is not None:
+            retrieval_fields["rerank_candidate_k"] = args.rerank_candidate_k
+            # --rerank-candidate-k must also deepen the fused pool for hybrid, or
+            # the reranker would be silently capped by the fusion depth.
+            if method == "hybrid_rerank":
+                retrieval_fields["candidate_k"] = args.rerank_candidate_k
+        if args.rerank_device is not None:
+            retrieval_fields["rerank_device"] = args.rerank_device
+        if args.rerank_batch_size is not None:
+            retrieval_fields["rerank_batch_size"] = args.rerank_batch_size
+        if args.rerank_max_length is not None:
+            retrieval_fields["rerank_max_length"] = args.rerank_max_length
+        if args.rerank_fallback:
+            retrieval_fields["rerank_fallback"] = True
+    retrieval_kwargs: dict = {"retrieval": RetrievalConfig(**retrieval_fields)}
+
+    default_name = DEFAULT_RUN_NAMES[method]
     # Historical default was "dense_baseline_v1"; keep the remap so a dense-named
     # run never collects a non-dense strategy's traces.
     requested_name = args.name if args.name is not None else default_name
     experiment_name = (
         default_name
-        if requested_name == "dense_baseline_v1" and args.retriever != "dense"
+        if requested_name == "dense_baseline_v1" and method != "dense"
         else requested_name
     )
 
@@ -147,9 +221,11 @@ def main() -> int:
         return 2
 
     method = config.retrieval.retrieval_method
-    is_bm25 = method == "bm25"
+    is_bm25 = method in ("bm25", "bm25_rerank")
     # Hybrid returns the dense vector store in this slot; its BM25 index is held
-    # by the composed retriever, so both sides are checked explicitly.
+    # by the composed retriever, so both sides are checked explicitly. With
+    # reranking on, the composite sits one level deeper behind the wrapper.
+    base_retriever = getattr(retriever, "base_retriever", retriever)
     doc_count = index_or_store.total_docs if is_bm25 else index_or_store.count()
     if doc_count == 0:
         if is_bm25:
@@ -162,8 +238,8 @@ def main() -> int:
                 config.index.collection_name,
             )
         return 1
-    if method == "hybrid":
-        if retriever.bm25_retriever.index.total_docs == 0:
+    if method in ("hybrid", "hybrid_rerank"):
+        if base_retriever.bm25_retriever.index.total_docs == 0:
             logger.error(
                 "Hybrid retrieval needs both indexes, but the BM25 index is empty. "
                 "Run scripts/build_bm25_index.py first."
@@ -174,9 +250,22 @@ def main() -> int:
             "(%d docs), rrf_k=%d candidate_k=%d",
             config.index.collection_name,
             doc_count,
-            retriever.bm25_retriever.index.total_docs,
+            base_retriever.bm25_retriever.index.total_docs,
             config.retrieval.rrf_k,
             config.retrieval.candidate_k,
+        )
+
+    if config.retrieval.rerank_enabled:
+        logger.info(
+            "Second-stage scoring active: model=%s revision=%s device=%s "
+            "batch_size=%d candidate_k=%d top_k=%d fallback=%s",
+            config.retrieval.rerank_model_id,
+            config.retrieval.rerank_model_revision,
+            config.retrieval.rerank_device,
+            config.retrieval.rerank_batch_size,
+            config.retrieval.rerank_candidate_k,
+            config.retrieval.top_k,
+            config.retrieval.rerank_fallback,
         )
 
     runner = ExperimentRunner(

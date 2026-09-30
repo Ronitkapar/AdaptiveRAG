@@ -10,16 +10,18 @@ from pathlib import Path
 from adaptive_rag import __version__
 from adaptive_rag.chunking.structure_aware import StructureAwareChunker
 from adaptive_rag.config.hashing import compute_config_hash, compute_file_sha256
-from adaptive_rag.config.paths import PAPERS_MANIFEST_PATH, REPO_ROOT
+from adaptive_rag.config.paths import PAPERS_MANIFEST_PATH, REPO_ROOT, RERANKER_DIR
 from adaptive_rag.embeddings.aicredits import AICreditsEmbeddingModel
 from adaptive_rag.generation.context import ContextBuilder
 from adaptive_rag.generation.groq import GroqGenerator
 from adaptive_rag.ingestion.pipeline import IngestionPipeline
 from adaptive_rag.indexing.bm25 import BM25Index
 from adaptive_rag.indexing.qdrant import QdrantVectorStore
+from adaptive_rag.reranking import OnnxCrossEncoderReranker, Reranker
 from adaptive_rag.retrieval.bm25 import BM25Retriever
 from adaptive_rag.retrieval.dense import DenseRetriever
 from adaptive_rag.retrieval.hybrid import HybridRetriever
+from adaptive_rag.retrieval.reranked import RerankedRetriever
 from adaptive_rag.schemas import (
     ChunkingConfig,
     ContextConfig,
@@ -29,6 +31,7 @@ from adaptive_rag.schemas import (
     GenerationConfig,
     IndexConfig,
     IngestionConfig,
+    RerankerConfig,
     RetrievalConfig,
 )
 
@@ -81,6 +84,8 @@ def build_experiment_config(
     active_retrieval = retrieval or RetrievalConfig()
     comp_versions = dict(COMPONENT_VERSIONS)
     comp_versions["retrieval"] = active_retrieval.retriever_version
+    if active_retrieval.rerank_enabled:
+        comp_versions["reranker"] = RerankerConfig().reranker_version
 
     config = ExperimentConfig(
         experiment_id=experiment_id or name,
@@ -107,12 +112,27 @@ def describe_component_versions() -> dict[str, str]:
     return dict(COMPONENT_VERSIONS)
 
 
+def build_reranker(config: ExperimentConfig) -> Reranker:
+    """Build the second-stage scorer described by the retrieval configuration."""
+    retrieval = config.retrieval
+    return OnnxCrossEncoderReranker(
+        model_id=retrieval.rerank_model_id,
+        model_revision=retrieval.rerank_model_revision,
+        device=retrieval.rerank_device,
+        batch_size=retrieval.rerank_batch_size,
+        max_length=retrieval.rerank_max_length,
+        model_dir=RERANKER_DIR,
+    )
+
+
 def instantiate_components(config: ExperimentConfig):
     """Build the runtime components described by an experiment configuration.
 
     Returns (embedding_model, vector_store_or_index, retriever, context_builder, generator,
     chunker, ingestion_pipeline). Component construction is lazy where credentials
-    are required.
+    are required. When `retrieval.rerank_enabled` is set, the first-stage retriever
+    is wrapped in a `RerankedRetriever`; slot 1 still holds the index or vector
+    store so callers can count and close it directly.
     """
     context_builder = ContextBuilder(
         context_config=config.context, generation_config=config.generation
@@ -121,7 +141,19 @@ def instantiate_components(config: ExperimentConfig):
     chunker = StructureAwareChunker(config=config.chunking)
     ingestion_pipeline = IngestionPipeline(config=config.ingestion)
 
-    if config.retrieval.retrieval_method == "bm25":
+    reranking = config.retrieval.rerank_enabled
+
+    def _maybe_wrap(retriever):
+        if not reranking:
+            return retriever
+        return RerankedRetriever(
+            base_retriever=retriever,
+            reranker=build_reranker(config),
+            config=config.retrieval,
+            corpus_version=config.corpus_version,
+        )
+
+    if config.retrieval.retrieval_method in ("bm25", "bm25_rerank"):
         bm25_index = BM25Index.load(
             expected_corpus_version=config.corpus_version,
         )
@@ -134,17 +166,23 @@ def instantiate_components(config: ExperimentConfig):
         return (
             None,
             bm25_index,
-            retriever,
+            _maybe_wrap(retriever),
             context_builder,
             generator,
             chunker,
             ingestion_pipeline,
         )
 
-    if config.retrieval.retrieval_method == "hybrid":
+    if config.retrieval.retrieval_method in ("hybrid", "hybrid_rerank"):
         # Hybrid fuses rankings, so a score threshold is meaningless across the two
         # branches: each constituent gets a threshold-free view of the config.
         constituent_config = config.retrieval.model_copy(update={"score_threshold": None})
+        if reranking:
+            # The fused pool must be deep enough to feed the second stage, otherwise
+            # `--rerank-candidate-k` would be silently capped by the fusion depth.
+            constituent_config = constituent_config.model_copy(
+                update={"candidate_k": config.retrieval.rerank_candidate_k}
+            )
         bm25_index = BM25Index.load(
             expected_corpus_version=config.corpus_version,
         )
@@ -163,16 +201,21 @@ def instantiate_components(config: ExperimentConfig):
             corpus_version=config.corpus_version,
             index_id="adaptiverag_bm25_v1",
         )
+        hybrid_config = config.retrieval
+        if reranking:
+            hybrid_config = hybrid_config.model_copy(
+                update={"candidate_k": config.retrieval.rerank_candidate_k}
+            )
         retriever = HybridRetriever(
             dense_retriever=dense_retriever,
             bm25_retriever=bm25_retriever,
-            config=config.retrieval,
+            config=hybrid_config,
             corpus_version=config.corpus_version,
         )
         return (
             embedding_model,
             vector_store,
-            retriever,
+            _maybe_wrap(retriever),
             context_builder,
             generator,
             chunker,
@@ -191,7 +234,7 @@ def instantiate_components(config: ExperimentConfig):
     return (
         embedding_model,
         vector_store,
-        retriever,
+        _maybe_wrap(retriever),
         context_builder,
         generator,
         chunker,

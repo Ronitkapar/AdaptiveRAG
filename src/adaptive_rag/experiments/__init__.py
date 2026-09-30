@@ -5,6 +5,7 @@ experiments package initialization.
 from adaptive_rag.experiments.config import (
     COMPONENT_VERSIONS,
     build_experiment_config,
+    build_reranker,
     compute_corpus_version,
     describe_component_versions,
     instantiate_components,
@@ -15,6 +16,7 @@ __all__ = [
     "COMPONENT_VERSIONS",
     "ExperimentRunner",
     "build_experiment_config",
+    "build_reranker",
     "compute_corpus_version",
     "describe_component_versions",
     "instantiate_components",
