@@ -1,6 +1,6 @@
 # Phase 5 — Reranking (Second-Stage Cross-Encoder)
 
-**Status:** IMPLEMENTED — live benchmark PENDING
+**Status:** COMPLETE — live benchmark executed; reranking measured and recorded as observed
 **Phase:** 5
 **Purpose:** Add a second-stage cross-encoder that re-scores the candidate list
 produced by any first-stage retriever, without modifying that retriever, and
@@ -347,6 +347,11 @@ rerank_fallback_count
 > Re-run dense and BM25 with `--no-judge --no-generation` for a strictly
 > like-for-like latency table, and state in §8 which run supplied each column.
 
+**Resolved in §8.4.** Dense and BM25 were re-run retrieval-only as
+`dense_baseline_ro_v1` and `bm25_baseline_ro_v1`; both reproduce their original
+retrieval metrics exactly, so the confound was the generation/judge harness
+rather than retrieval. All six columns in §8 are now retrieval-only.
+
 Reranked dense and hybrid runs need `AICREDITS_API_KEY` (query embeddings, as
 in Phase 4). **All** reranked runs need network on first use to download the
 ONNX artifact; after that they are offline.
@@ -366,37 +371,133 @@ values the same way.
 
 ## 8. Results
 
-**PENDING — not measured.** The implementation and test environment has no
-outbound network and no GPU, so the ONNX artifact cannot be downloaded and the
-benchmark cannot be executed from here. Steps 1–9 and 11–12 are fully offline
-and complete; step 10 (the six primary runs, the 10/20/40 depth ablation, and
-`compare_reranking.py`) is deferred to a networked machine.
+**MEASURED.** All six configurations and the depth ablation were executed on a
+CPU-only host (12 cores, no GPU), retrieval-only, against the canonical corpus
+`corpus_6c416f423920385d` and the 20-example `dense_eval_v1` benchmark. The
+reranker was pinned to `Xenova/ms-marco-MiniLM-L-6-v2` at revision
+`a09144355adeed5f58c8ed011d209bf8ee5a1fec`, `batch_size=16`, `max_length=512`,
+`device=auto` resolving to CPU.
 
-This table is to be filled **as observed**, including the case where reranking
-does not pay for itself:
+Latency columns are per-query means in milliseconds. `retr. lat` is end-to-end
+retrieval; `cand. gen` and `rerank` are its two stages, so
+`retr. lat` = `cand. gen` + `rerank`. Baseline rows carry no split, so those two
+cells read `--` by design rather than as missing data.
 
 | Strategy | R@1 | R@5 | R@10 | MRR | nDCG@10 | retr. lat (ms) | cand. gen (ms) | rerank (ms) |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| dense | | | | | | | | |
-| dense_rerank | | | | | | | | |
-| bm25 | | | | | | | | |
-| bm25_rerank | | | | | | | | |
-| hybrid | | | | | | | | |
-| hybrid_rerank | | | | | | | | |
+| dense | 0.8417 | 0.8417 | 0.8583 | 0.9500 | 0.9308 | 621.35 | -- | -- |
+| dense_rerank | 0.6917 | 0.8583 | 0.8750 | 0.8667 | 0.8646 | 7708.96 | 881.96 | 6826.99 |
+| bm25 | 0.5417 | 0.7167 | 0.7833 | 0.6771 | 0.7378 | 1.71 | -- | -- |
+| bm25_rerank | 0.4667 | 0.6583 | 0.8083 | 0.6162 | 0.6713 | 4014.21 | 3.81 | 4010.40 |
+| hybrid | 0.6417 | 0.8583 | 0.8750 | 0.8200 | 0.8557 | 721.00 | -- | -- |
+| hybrid_rerank | 0.4667 | 0.7583 | 0.8750 | 0.6926 | 0.7567 | 4447.68 | 960.60 | 3487.09 |
 
-Depth ablation (`top_k = 10` held constant):
+Depth ablation (`hybrid_rerank`, `top_k = 10` held constant):
 
 | candidate_k | R@5 | MRR | rerank latency (ms) | cand. gen (ms) |
 | --- | --- | --- | --- | --- |
-| 10 | | | | |
-| 20 | | | | |
-| 40 | | | | |
+| 10 | 0.7917 | 0.7921 | 3003.67 | 836.84 |
+| 20 | 0.7583 | 0.6926 | 3487.09 | 960.60 |
+| 40 | 0.7333 | 0.7058 | 7667.37 | 926.99 |
 
-Expected cost shape, to be confirmed rather than assumed: with MiniLM-L-6 at
-`batch_size=16`, ~40 pairs is tens of milliseconds on 12 CPU cores — small next
-to dense's ~750 ms network embedding. Recording the split per stage rather than
-only as a total is what makes the reranker's own cost readable independently of
-embedding noise.
+### 8.1 Reranking did not pay for itself on this benchmark
+
+**Recorded as observed: reranking was a net loss on every strategy here.** The
+result is consistent across the three first stages rather than noisy. Reranking
+*bought* a little tail recall and *spent* more head precision.
+
+* Recall@10 improved or held on all three: dense +0.0167, BM25 +0.0250, hybrid
+  +/-0.0000. The reranker does surface relevant chunks the first stage missed.
+* Every head metric moved the other way, on all three strategies. MRR fell
+  -0.0833 (dense), -0.0609 (BM25), -0.1274 (hybrid); nDCG@5 fell -0.1270,
+  -0.1484, -0.1507; Precision@5 fell -0.1600, -0.1500, -0.1500.
+* The same direction is monotone in candidate depth (§8.2): deeper pools give
+  worse R@5 and worse MRR at sharply rising cost.
+
+Per-trace inspection explains the shape. In the hybrid run the reranker pulled a
+candidate from *beyond* the first-stage top-10 in **20/20** traces, so it is
+genuinely reordering rather than no-op'ing; yet the reranked #1 equals the
+first-stage #1 in only **3/20** traces. The cross-encoder applies a real but
+poorly-calibrated ordering signal to this corpus, discarding strong first-stage
+rankings near the top in favour of deeper candidates it scores marginally
+higher.
+
+The likely cause is a **domain mismatch** the phase design anticipated but could
+not avoid. `ms-marco-MiniLM-L-6-v2` is a ~22 M-parameter general-web MS-MARCO
+cross-encoder, scored here against 14 dense academic RAG papers whose chunks
+average ~1 870 characters (~470 tokens, right at the `max_length=512`
+truncation boundary). Short, citation-heavy academic prose is a different
+distribution from the MS-MARCO passages the model was trained to rank. Because
+reranking is a *composition layer* by design, this is a finding about the model
+choice rather than a defect in the mechanism; substituting a domain-specific
+cross-encoder is out of Phase 5 scope.
+
+### 8.2 Depth ablation: more candidates, worse and slower
+
+The depth curve runs against the usual second-stage story. R@5 falls
+0.7917 -> 0.7583 -> 0.7333 as the pool widens 10 -> 20 -> 40, while rerank
+latency climbs 3.00 s -> 3.49 s -> 7.67 s. `k=10` is simultaneously the cheapest
+*and* the most accurate reranked configuration measured.
+
+A deeper pool gives the cross-encoder more opportunities to promote a spurious
+candidate, and on this corpus its judgements degrade faster than the extra recall
+is worth. Cost per unit of quality is monotonically unfavourable beyond `k=10`.
+
+### 8.3 Cost: the predicted shape was wrong by two orders of magnitude
+
+§4 and §7 expected "tens of milliseconds" for ~40 pairs and treated the reranker
+as nearly free next to dense's ~750 ms network embedding. **Measurement refutes
+that expectation.** A warm-session micro-benchmark over real corpus chunks gives
+~155 ms per pair (10 pairs 1 519 ms, 20 pairs 3 209 ms, 40 pairs 6 221 ms), so
+the 20-candidate configuration costs **~4.0 s** end to end against BM25's
+**1.7 ms** -- roughly a 2 300x slowdown over the cheapest first stage, and about
+11x dense's own 621 ms, which is itself dominated by the query-embedding round
+trip.
+
+That cost is linear in candidate count and is intrinsic to CPU inference on
+512-token sequences rather than to this implementation: batch-size invariance is
+asserted in tests, the split is recorded per stage, and no fallback fired
+(`rerank_fallback_count = 0` in every run). A GPU deployment would change the
+absolute numbers; the *ranking* conclusion would not, since that is a quality
+result.
+
+Recording the split per stage is what made this legible: the total alone would
+have read as "reranking is expensive" without separating a 3-7 s cross-encoder
+from a 1-3 ms first stage.
+
+### 8.4 Run provenance
+
+Every row above is retrieval-only (`--no-judge --no-generation`), so the six
+configurations are like-for-like. `empty: 20` in each manifest is the runner's
+label for a retrieval-only run with no generator, not a retrieval failure; every
+run recorded 20/20 traces with `retrieval_failed: 0` and `rerank_fallback_count: 0`.
+
+| Column | Run directory |
+| --- | --- |
+| dense | `20260930T170100Z-dense_baseline_ro_v1` |
+| dense_rerank | `20260930T170129Z-dense_rerank_v1` |
+| bm25 | `20260930T170121Z-bm25_baseline_ro_v1` |
+| bm25_rerank | `20260930T170537Z-bm25_rerank_v1` |
+| hybrid | `20260929T175539Z-hybrid_baseline_v1` |
+| hybrid_rerank / k=20 | `20260930T170835Z-hybrid_rerank_v1` |
+| k=10 | `20260930T171229Z-hybrid_rerank_k10_v1` |
+| k=40 | `20260930T171504Z-hybrid_rerank_k40_v1` |
+
+Dense and BM25 were re-run retrieval-only to resolve the §7.3 comparability
+caveat: the `dense_baseline_v1` run on disk was a *full* run with generation and
+an LLM judge, so its latency was not comparable to the other five. The retrieval
+metrics reproduce exactly (dense R@5 0.8417, BM25 R@5 0.7167), confirming
+retrieval parity; only the harness differed. The hybrid baseline was already
+retrieval-only on the same corpus with the same 20 traces and `top_k=10`, and
+`compare_reranking.py` verified corpus, trace count, and retrieval method across
+all three pairs before emitting the tables.
+
+The k=20 ablation row reuses the `hybrid_rerank_v1` run because its config is
+identical (default `rerank_candidate_k=20`); a separate k=20 run would be the
+same experiment twice.
+
+---
+
 
 ---
 
@@ -490,18 +591,50 @@ credentials, no network, no live indexes.
 
 ### Live experiment
 
-**PENDING.** Not runnable from the implementation environment: no outbound
-network (so the ONNX artifact cannot be downloaded), and
-`onnxruntime` / `tokenizers` / `huggingface-hub` are declared in
-`pyproject.toml` but could not be installed here.
+**COMPLETE.** The benchmark was executed on a networked, CPU-only host. The
+declared dependencies installed cleanly (`onnxruntime` 1.30.0, `tokenizers`
+0.23.2, `huggingface-hub` 1.33.0) and the blocking assumption above was
+**confirmed rather than assumed**: `Xenova/ms-marco-MiniLM-L-6-v2` resolves at
+revision `a09144355adeed5f58c8ed011d209bf8ee5a1fec` and provides
+`onnx/model.onnx` (90 992 115 bytes), `tokenizer.json`, and `config.json`. No
+model substitution was made and ADR-020 needed no change.
 
-**Blocking assumption:** step 10 depends on
-`Xenova/ms-marco-MiniLM-L-6-v2` resolving to a repo containing
-`onnx/model.onnx`, `tokenizer.json`, and `config.json`. Run the
-integration-marked ONNX test first; if the artifact does not resolve, fix the
-model id before spending a benchmark run. Do not silently substitute a different
-model — `Xenova/ms-marco-MiniLM-L-12-v2` is a documented drop-in via
-`--reranker-model`, and any substitution belongs in ADR-020.
+Running the integration-marked ONNX test first, as advised, paid for itself: it
+surfaced two latent defects that the offline suite could not reach, both now
+fixed and both with regression coverage.
+
+**Fix 1 — the documented integration command could not run.**
+`tests/conftest.py` added an unconditional `skip` marker to every
+integration-marked item, so `pytest -m integration tests/test_reranking.py`
+reported `2 skipped` and never executed the ONNX session, on this machine or
+any other. A command-line `-m` overrides the `addopts` `-m 'not integration'`, so
+the caller had already opted in and the guard had to yield. The guard now skips
+only when no `-m` expression requests integration, and still skips for
+`-m "not integration"`. The default run is unchanged at `136 passed, 2
+deselected`.
+
+**Fix 2 — two live-path assertions were unfalsifiable.** The live relevance
+assertion read `scores[...] > scores[0] * 0`, which compares a score with itself
+against a zero baseline and never ranks anything; this model's head is a single
+raw regression logit whose scale is entirely negative for non-matches, so it
+could never hold. It now asserts the ordering the comment describes (the BM25
+passage outranks the unrelated fusion passage). Separately, `snapshot_download`
+was unwrapped, so a missing repository leaked a raw `huggingface_hub` error
+instead of the documented `RerankerModelError`; download failures are now
+translated into the project's own typed error, with the original exception
+chained as `__cause__`.
+
+After the fixes: `pytest -m integration tests/test_reranking.py` → **2 passed**,
+and the offline suite → **136 passed, 2 deselected**.
+
+Live benchmark: **COMPLETE.** Six primary configurations plus the k = 10 / 20 / 40
+depth ablation, all retrieval-only, on corpus `corpus_6c416f423920385d` and the
+20-example benchmark; 20/20 traces each, `retrieval_failed: 0`,
+`rerank_fallback_count: 0` in every run. `compare_reranking.py` verified corpus,
+trace count, and retrieval method across all three pairs before emitting both
+tables. Full results and interpretation in §8; the headline is that reranking
+did **not** pay for itself on this corpus, and that the documented cost estimate
+was wrong by two orders of magnitude.
 
 ---
 
@@ -527,9 +660,13 @@ model — `Xenova/ms-marco-MiniLM-L-12-v2` is a documented drop-in via
 - [x] **Evaluation parity**: consumed unchanged by `ExperimentRunner` and
       `RetrievalEvaluator`; `EfficiencyEvaluator`'s new metrics are additive and
       conditional, so existing runs' output is unchanged.
-- [x] **Testing**: 136 offline deterministic tests pass, including guards.
+- [x] **Testing**: 136 offline deterministic tests pass, including guards, plus
+      the 2 integration-marked ONNX tests against a real session.
 - [x] **Documentation**: `phase-5.md`, `progress.md`, `decision.md` (ADR-020),
       `architecture.md`, `README.md`, `experiments/README.md` updated.
-- [ ] **Live evaluation**: six primary configurations plus the 10/20/40 depth
+- [x] **Live evaluation**: six primary configurations plus the 10/20/40 depth
       ablation run on a networked machine, compared via
-      `compare_reranking.py`, and §8 filled in as observed.
+      `compare_reranking.py`, and §8 filled in as observed. Recorded outcome:
+      reranking **did not** improve this corpus (§8.1) and cost ~155 ms per
+      candidate pair on CPU, two orders of magnitude above the estimate in §4
+      (§8.3).

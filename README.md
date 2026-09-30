@@ -274,13 +274,37 @@ Overrides: `--reranker-model`, `--reranker-revision` (pin it — recorded in
 - [x] retrieval metrics consumed unchanged; efficiency split additive and
       conditional, so baseline artifacts are byte-identical
 - [x] 136 offline tests pass (2 `integration` deselected), including four new
-      architecture guards verified to fail against broken variants
+      architecture guards verified to fail against broken variants; the 2
+      integration-marked ONNX tests also pass against a real session
 - [x] docs updated (`docs/phases/phase-5.md`, `progress.md`, `decision.md`
       ADR-020, `architecture.md`, `experiments/README.md`)
-- [ ] **live benchmark** — six primary configurations plus the 10/20/40 depth
-      ablation, run on a networked machine and recorded **as observed**. Blocked
-      here: the implementation environment has no outbound network and no GPU,
-      so the ONNX artifact cannot be downloaded and `onnxruntime` / `tokenizers`
-      / `huggingface-hub` could not be installed.
+- [x] **live benchmark** — six primary configurations plus the 10/20/40 depth
+      ablation executed on a networked host and recorded **as observed**
+
+### Measured result
+
+On this corpus **reranking did not pay for itself**, and the pre-registered
+latency estimate was wrong by two orders of magnitude. Retrieval-only,
+20-example benchmark, CPU, corpus `corpus_6c416f423920385d`:
+
+| Strategy | R@1 | R@5 | R@10 | MRR | retr. lat (ms) | rerank (ms) |
+| --- | --- | --- | --- | --- | --- | --- |
+| dense | 0.8417 | 0.8417 | 0.8583 | 0.9500 | 621.35 | — |
+| dense_rerank | 0.6917 | 0.8583 | 0.8750 | 0.8667 | 7708.96 | 6826.99 |
+| bm25 | 0.5417 | 0.7167 | 0.7833 | 0.6771 | 1.71 | — |
+| bm25_rerank | 0.4667 | 0.6583 | 0.8083 | 0.6162 | 4014.21 | 4010.40 |
+| hybrid | 0.6417 | 0.8583 | 0.8750 | 0.8200 | 721.00 | — |
+| hybrid_rerank | 0.4667 | 0.7583 | 0.8750 | 0.6926 | 4447.68 | 3487.09 |
+
+Recall@10 improved or held on all three strategies, but every head metric fell on
+all three (MRR -0.0833 / -0.0609 / -0.1274). Depth ablation: R@5 falls
+0.7917 → 0.7583 → 0.7333 for k = 10 / 20 / 40 while rerank latency climbs
+3.00 s → 3.49 s → 7.67 s, so `k=10` is both cheapest and most accurate.
+Measured cost is ~155 ms per candidate pair, not the predicted tens of
+milliseconds. Likely cause is domain mismatch — a general-web MS-MARCO
+cross-encoder scoring dense academic RAG prose — which is a finding about the
+model choice, not the composition-layer design. Full tables, per-run provenance,
+and the three latent defects the live test surfaced are in
+`docs/phases/phase-5.md` §8 and §9.
 
 Full record: [`docs/phases/phase-5.md`](docs/phases/phase-5.md).
