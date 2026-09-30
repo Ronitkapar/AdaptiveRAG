@@ -35,7 +35,7 @@ Evaluation will consider:
 | Phase 2 — Fixed Dense-RAG Baseline | IMPLEMENTATION COMPLETE / OFFLINE VALIDATED |
 | Phase 3 — BM25                     | COMPLETE                                    |
 | Phase 4 — Hybrid                   | COMPLETE                                    |
-| Phase 5 — Reranking                | FUTURE                                      |
+| Phase 5 — Reranking                | IMPLEMENTED / OFFLINE VALIDATED              |
 | Phase 6 — Adaptive Routing         | FUTURE                                      |
 | Phase 7 — Evaluation & Ablations   | FUTURE                                      |
 
@@ -394,8 +394,119 @@ recall (Recall@5/@10) while losing to it on rank-1 precision and MRR, and costs
 essentially the same as dense because fusion itself takes 0.65 ms.
 
 This is the fixed-strategy evidence base the adaptive system will be measured
+against.
+
+---
+
+# Phase 5 — Reranking (Second-Stage Cross-Encoder)
+
+Status: IMPLEMENTED / OFFLINE VALIDATED — live benchmark PENDING
+
+Full record: [`docs/phases/phase-5.md`](phases/phase-5.md).
+Decision: ADR-020 in [`docs/decision.md`](decision.md).
+
+Implemented:
+
+* `reranking/base.py` — the `Reranker` protocol, deliberately isolated from
+  every retriever, index, and corpus artifact. Input order is preserved, the
+  returned length must equal the input length, and scores are documented as
+  model-specific ranking signals rather than calibrated probabilities
+* `reranking/onnx_backend.py` — `OnnxCrossEncoderReranker`, the only module that
+  runs a model. ONNX Runtime over a pre-exported ms-marco cross-encoder
+  (`Xenova/ms-marco-MiniLM-L-6-v2`, ~22 M params, ~90 MB ONNX). No torch, no
+  transformers, and `sentence-transformers` stays banned. Batched (default 16),
+  truncation at 512, explicit `cpu`/`cuda`/`auto` provider selection with a hard
+  error rather than a silent CPU downgrade, `num_labels`-driven output decoding.
+  The artifact is fetched on first use into `storage/reranker/`, and
+  `onnxruntime`/`tokenizers` are imported lazily so importing the module never
+  touches the network
+* `retrieval/reranked.py` — `RerankedRetriever`, conforming to `Retriever`,
+  wrapping **any** base retriever (dense, BM25, or hybrid). Queries the base at
+  `rerank_candidate_k`, re-scores, sorts by
+  `(-rerank_score, retrieval_rank, chunk_id)`, truncates to `top_k`, and
+  renumbers ranks. `text`, `metadata`, and `provenance` pass through untouched;
+  `retrieval_score` and `retrieval_rank` preserve the first-stage signal and
+  position
+* `retrieval_method` gains `dense_rerank` / `bm25_rerank` / `hybrid_rerank` with
+  matching `retriever_version`s. `RetrievalConfig` gains eight `rerank_*`
+  fields, all covered by `config_hash`; the validator enforces
+  `rerank_candidate_k >= top_k` and, for hybrid, `candidate_k >=
+  rerank_candidate_k`. A dedicated `RerankerConfig` model mirrors
+  `HybridRetrievalConfig`
+* `RetrievalMetadata` second-stage diagnostics and `ExperimentTrace` latency /
+  count split, all optional with `None` defaults so existing run directories
+  still validate
+* `experiments/config.py` wraps the base retriever when `rerank_enabled`, with
+  hybrid's fusion depth coupled to the rerank depth; the dense
+  `vector_store` stays in the CLI's index slot so `count()` / `close()` keep
+  working, and `run_experiment.py`'s hybrid index check unwraps through
+  `retriever.base_retriever`
+* `evaluation/efficiency.py` reports the split — but only when a trace carries
+  it, so non-reranked runs' output is byte-identical
+* `scripts/run_experiment.py --rerank` plus `--reranker-model`,
+  `--reranker-revision`, `--rerank-candidate-k`, `--rerank-device`,
+  `--rerank-batch-size`, `--rerank-max-length`, `--rerank-fallback`, and
+  `{dense,bm25,hybrid}_rerank_v1` run-name defaults
+* `scripts/compare_reranking.py` — base-vs-reranked table plus a depth-ablation
+  table. It never auto-discovers a rerank run by glob; every run is supplied
+  explicitly, and it exits 2 on corpus, trace-count, or method mismatch.
+  `compare_retrievers.py` is untouched
+
+Failure semantics:
+
+* An empty query raises `InvalidQueryError` before the base retriever is
+  touched
+* An empty candidate pool is **not** a failure: `status="no_results"`,
+  `rerank_latency_ms == 0.0`, and the reranker is never invoked
+* A reranker exception propagates unchanged by default and becomes
+  `status="retrieval_failed"` with the original error type. The single
+  `try`/`except` in `reranked.py` is gated on `config.rerank_fallback`, and an
+  AST guard asserts the handler both re-raises and references that flag. When
+  the opt-in fallback is taken it sets `rerank_fallback=True`, visible in every
+  trace, in `rerank_fallback_count`, and in the manifest
+* A score/candidate length mismatch raises `RerankingError` rather than silently
+  truncating the result list
+
+Validation: **136 offline deterministic tests pass**, 2 deselected
+(`integration`). No credentials, no network, no live indexes. Covers scoring and
+ordering, `top_k` behaviour, candidate depth (12/20/40) and hybrid depth
+coupling, the empty-pool no-model path, deterministic tie-breaking, batch-size
+invariance, metadata/provenance/text passthrough, latency accounting, all four
+failure paths, protocol conformance, score-contract enforcement, config
+validation and hash coverage, offline integration through `ExperimentRunner`
+for all three strategies, canonical-corpus regression, byte-identical output
+with reranking disabled, old run artifacts still validating, the comparison CLI
+driven as a subprocess, and four new architecture guards — each verified to fail
+against a deliberately broken variant rather than passing vacuously.
+`retrieval/dense.py`, `retrieval/bm25.py`, `retrieval/hybrid.py`, and
+`retrieval/fusion.py` are unmodified.
+
+Live benchmark: **PENDING.** The implementation environment has no outbound
+network and no GPU, so the ONNX artifact cannot be downloaded and
+`onnxruntime` / `tokenizers` / `huggingface-hub` could not be installed. All
+reranked runs also need `AICREDITS_API_KEY` for query embeddings (dense and
+hybrid only). Runs to execute on a networked machine, after the
+integration-marked ONNX test confirms the artifact resolves:
+
+1. the six primary configurations (`{dense,bm25,hybrid}` × `{baseline,
+   reranked}`), retrieval-only via `--no-judge --no-generation`
+2. the `k = 10 / 20 / 40` hybrid depth ablation with `top_k` held at 10
+3. `scripts/compare_reranking.py` over those runs
+
+Results are to be recorded **as observed**, including the case where reranking
+does not pay for itself. Note the latency comparability caveat: `dense_baseline_v1`
+on disk is a full run with generation and judge, while the BM25 and hybrid
+baselines are retrieval-only, so a strictly like-for-like table requires
+re-running dense and BM25 retrieval-only.
+
+This is the fixed-strategy evidence base the adaptive system will be measured
 against. The next development phase is:
 
-> Phase 5 — Reranking
+> Phase 6 — Adaptive Routing
 
-Do not implement Phase 5+ functionality until the phase is explicitly started.
+Do not implement Phase 6+ functionality until the phase is explicitly started.
+Query classification, strategy selection, and adaptive routing remain
+architecture-guard banned (`adaptive_rout`, `query_classif`, `strategy_select`).
+`RerankedRetriever` is deliberately not conditional on anything — it never
+decides whether reranking is worth it, for which query type, or at what
+candidate depth. Those questions are Phase 6's.

@@ -34,9 +34,9 @@ Adaptive Routing
 ```
 
 The current implementation has established the Dense-RAG baseline (Phase 2),
-the BM25 lexical baseline (Phase 3), and the hybrid rank-fusion strategy
-(Phase 4). All three operate over the same canonical chunk corpus and share the
-same retrieval/evaluation contracts.
+the BM25 lexical baseline (Phase 3), the hybrid rank-fusion strategy (Phase 4),
+and second-stage cross-encoder reranking (Phase 5). All four operate over the
+same canonical chunk corpus and share the same retrieval/evaluation contracts.
 
 Future retrieval strategies should reuse the existing retrieval and
 evaluation contracts wherever possible.
@@ -119,6 +119,79 @@ Guarantees:
 
 `retrieval_method ∈ {"dense", "bm25", "hybrid"}` across configuration, traces,
 and manifests, with `retriever_version` aligned (`hybrid ⇔ hybrid_v1`).
+
+---
+
+# 3c. Phase 5 Reranking Branch
+
+Phase 5 adds a second stage above any first-stage retriever. It reorders what
+that retriever already returned; it never decides *whether* to run, and it owns
+no index, no embedding model, and no corpus handle:
+
+```text
+   DenseRetriever | BM25Retriever | HybridRetriever   (all unchanged)
+                          │
+                          │  RetrievalResponse, ≤ N candidates
+                          ▼
+                 ┌─────────────────────┐
+                 │   RerankedRetriever  │   candidate_generation_latency_ms
+                 │                     │   ← reused from the base response
+                 │   reranker.score(query, [c.text ...])   ──► rerank_latency_ms
+                 │   sort by (-rerank_score, retrieval_rank, chunk_id)
+                 │   truncate → top_k, renumber ranks 1..n
+                 └─────────────────────┘
+                          │  RetrievalResponse(retrieval_method="<base>_rerank")
+                          ▼
+             ExperimentRunner + evaluators (unchanged)
+```
+
+`OnnxCrossEncoderReranker` sits behind a `Reranker` protocol and runs on ONNX
+Runtime over a pre-exported ms-marco cross-encoder. No torch, no transformers,
+and `sentence-transformers` stays banned.
+
+Guarantees:
+
+* **Composition, not reimplementation.** `reranked.py` holds only a
+  `base_retriever` and a `reranker`. It contains no `qdrant`, `idf`,
+  `tokenize`, `embedding_model`, or `vector_store`, imports none of the concrete
+  retrievers, and architecture-guards enforce all of it. `dense.py`, `bm25.py`,
+  `hybrid.py`, and `fusion.py` are untouched and independently guard-checked.
+* **Score separation.** `score` is the rerank score; the first-stage signal
+  survives as `retrieval_score` and the pre-rerank position as
+  `retrieval_rank`. Rerank scores are never averaged, normalized, or blended
+  with cosine / BM25 / RRF values, and they are ranking signals rather than
+  calibrated probabilities.
+* **Deterministic output.** Ordering is `(-rerank_score, retrieval_rank,
+  chunk_id)`, so equal scores never depend on input order. Scoring is per-pair
+  with no cross-pair interaction, so output is batch-size invariant.
+* **Candidate depth.** The base is queried at `rerank_candidate_k` (default 20)
+  and truncation to `top_k` happens only after scoring. For
+  `hybrid_rerank`, `--rerank-candidate-k` also raises the fusion `candidate_k`,
+  so one flag controls depth end-to-end.
+* **Fail closed by default.** A reranker exception propagates unchanged and
+  yields `status="retrieval_failed"` with the original error type. The single
+  `try`/`except` in the module is gated on `config.rerank_fallback`, and an AST
+  guard asserts the handler both re-raises and references that flag. When the
+  opt-in fallback is taken, `rerank_fallback=True` surfaces in every trace, in
+  `rerank_fallback_count`, and in the manifest.
+* **No model on an empty pool.** An empty candidate set returns
+  `status="no_results"` with `rerank_latency_ms == 0.0` and no model
+  invocation; that is distinct from a reranker failure.
+* **No threshold forwarding.** `score_threshold` is not passed to the base
+  retriever — mirroring the Phase 4 §3b decision — because applying one there
+  would silently shrink the candidate pool before the ranker sees it. The
+  configured value is echoed into metadata for traceability only.
+* **Additive cost accounting.** `latency_ms` stays the full end-to-end total
+  (the Phase 4 hybrid rule) so existing efficiency metrics keep their meaning;
+  the candidate-generation / rerank split is added alongside it and its metrics
+  are emitted only for reranked runs.
+
+`retrieval_method ∈ {"dense", "bm25", "hybrid", "dense_rerank", "bm25_rerank",
+"hybrid_rerank"}` across configuration, traces, and manifests, with
+`retriever_version` aligned (`dense_rerank ⇔ dense_rerank_v1`, and likewise for
+bm25 and hybrid). Every `rerank_*` setting lives inside `RetrievalConfig` and is
+covered by `config_hash`; `component_versions["reranker"]` appears only when
+reranking is enabled.
 
 ---
 
@@ -534,6 +607,12 @@ estimated cost
 errors
 configuration/version
 ```
+
+On reranked runs the trace additionally carries the second-stage split
+(`candidate_generation_latency_ms`, `rerank_latency_ms`,
+`rerank_candidate_count`, `rerank_result_count`, `rerank_fallback`). All five
+default to `None`, so traces recorded before Phase 5 still validate against the
+schema unchanged.
 
 Aggregate metrics should be traceable back to raw results.
 

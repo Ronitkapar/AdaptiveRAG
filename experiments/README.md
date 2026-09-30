@@ -49,3 +49,68 @@ Hybrid requires **both** the Qdrant collection (`scripts/build_index.py`) and
 the BM25 index (`scripts/build_bm25_index.py`); the CLI checks both and names
 the missing one. A failing branch is recorded as `retrieval_failed` with the
 original error type — hybrid never silently degrades to a single strategy.
+
+---
+
+## Running the reranked baselines (Phase 5)
+
+`--rerank` wraps the chosen first-stage retriever in a second-stage
+cross-encoder. The ONNX artifact is downloaded to `storage/reranker/` on first
+use and reused afterwards, so only the first reranked run needs network access.
+
+```bash
+# Confirm the artifact resolves before spending a benchmark run.
+.venv/bin/pytest -m integration tests/test_reranking.py
+
+# Second-stage runs (retrieval-only). dense and hybrid need AICREDITS_API_KEY
+# for query embeddings, as in Phase 4; bm25_rerank needs no credentials.
+.venv/bin/python scripts/run_experiment.py --retriever dense  --rerank --name dense_rerank_v1  --no-judge --no-generation
+.venv/bin/python scripts/run_experiment.py --retriever bm25   --rerank --name bm25_rerank_v1   --no-judge --no-generation
+.venv/bin/python scripts/run_experiment.py --retriever hybrid --rerank --name hybrid_rerank_v1 --no-judge --no-generation
+
+# Candidate-depth ablation, final top_k held at 10
+for k in 10 20 40; do
+  .venv/bin/python scripts/run_experiment.py --retriever hybrid --rerank \
+      --rerank-candidate-k $k --name hybrid_rerank_k${k}_v1 --no-judge --no-generation
+done
+
+# Compare each baseline against its reranked variant, plus the depth table.
+# Every run directory is explicit — compare_reranking.py never auto-discovers.
+.venv/bin/python scripts/compare_reranking.py \
+    --dense-run experiments/<dense_baseline_v1> \
+    --dense-rerank-run experiments/<id-dense_rerank_v1> \
+    --hybrid-run experiments/<hybrid_baseline_v1> \
+    --hybrid-rerank-run experiments/<id-hybrid_rerank_v1> \
+    --ablation-run experiments/<id-hybrid_rerank_k10_v1> \
+    --ablation-run experiments/<id-hybrid_rerank_k20_v1> \
+    --ablation-run experiments/<id-hybrid_rerank_k40_v1>
+```
+
+`--name` defaults to `<strategy>_rerank_v1` when `--rerank` is set, so rerank
+runs never land in a baseline directory.
+
+`--rerank-candidate-k` also raises hybrid's fusion `candidate_k` to match, so
+one flag controls depth end-to-end.
+
+Other overrides: `--reranker-model`, `--reranker-revision` (pin it —
+`config.json` records it), `--rerank-device {auto,cpu,cuda}`,
+`--rerank-batch-size`, `--rerank-max-length`, and `--rerank-fallback`.
+
+## What a reranked run adds to its artifacts
+
+- `retrieval_method` is `dense_rerank` / `bm25_rerank` / `hybrid_rerank`, and
+  `component_versions["reranker"]` appears in the manifest
+- each result carries `retrieval_score` and `retrieval_rank` alongside the
+  rerank `score`
+- `traces.jsonl` gains `candidate_generation_latency_ms`, `rerank_latency_ms`,
+  `rerank_candidate_count`, `rerank_result_count`, and `rerank_fallback`
+- `metrics_efficiency.json` gains the split-latency and count metrics — but only
+  for reranked runs, so baseline artifacts are unchanged
+
+Reranking **fails closed by default**: a reranker error is recorded as
+`retrieval_failed` with the original error type. `--rerank-fallback` opts into
+returning un-reranked candidates instead, and sets `rerank_fallback=True` in
+every trace so the degradation is visible rather than silent.
+
+`compare_retrievers.py` is unchanged by Phase 5 and remains the dense-vs-BM25
+(plus optional hybrid) table. Use `compare_reranking.py` for reranked runs.

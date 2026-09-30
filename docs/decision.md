@@ -343,6 +343,7 @@ Phase 1 → COMPLETE
 Phase 2 → COMPLETE
 Phase 3 → COMPLETE
 Phase 4 → COMPLETE
+Phase 5 → IMPLEMENTED (live benchmark pending)
 ```
 
 Future functionality must not be implemented prematurely.
@@ -444,3 +445,71 @@ Phase 4 baseline rather than as a final answer: a chunk that only one branch
 ranks highly accumulates a single small term and falls below chunks both
 branches agree on, so fusion improves coverage and degrades the single best
 guess. Correcting top-rank ordering is left to later phases.
+
+---
+
+## ADR-020 — Reranking as an Independent Second Stage
+
+Status: ACCEPTED
+
+Phase 5 adds second-stage cross-encoder reranking as a **composition layer**,
+not as a new retrieval strategy of its own:
+
+* The `Reranker` protocol (`reranking/base.py`) is deliberately isolated from
+  every retriever, index, and corpus artifact: it receives a query and passages
+  and returns one score per passage. It holds no vector store, no BM25 index, no
+  embedding model, and no corpus handle.
+* `RerankedRetriever` wraps **any** first-stage `Retriever` — dense, BM25, or
+  hybrid — and only reorders what that retriever already returned. It never
+  imports `retrieval.dense`, `retrieval.bm25`, `retrieval.hybrid`, or
+  `retrieval.fusion`, and `retrieval/dense.py`, `retrieval/bm25.py`,
+  `retrieval/hybrid.py`, and `retrieval/fusion.py` remain unmodified.
+* `retrieval_method` gains `dense_rerank`, `bm25_rerank`, and `hybrid_rerank`,
+  each paired with a matching `retriever_version`. A manifest therefore names
+  the whole pipeline, not just its head, and all six Phase 1–5 configurations
+  are unambiguous in a comparison.
+* **The runtime is ONNX Runtime over a pre-exported cross-encoder**
+  (`Xenova/ms-marco-MiniLM-L-6-v2`, ~22 M params, ~90 MB ONNX). No torch, no
+  `transformers`, and `sentence-transformers` remains a banned dependency, so
+  the heavy-dependency ban from ADR-016 stands unweakened. `onnxruntime` and
+  `tokenizers` are imported lazily inside the backend's loader, so importing the
+  module never touches the network and offline unit tests never depend on a
+  model download.
+* `score` holds the rerank score, mirroring Phase 4's rule that `score` is the
+  signal that produced the current order. The first-stage signal is preserved
+  separately as `retrieval_score` and the pre-rerank position as
+  `retrieval_rank`. Rerank scores are **never** averaged, normalized, or blended
+  with cosine / BM25 / RRF values; they are model-specific ranking signals, not
+  calibrated probabilities.
+* Ordering is `(-rerank_score, retrieval_rank, chunk_id)`. The pre-rerank rank
+  and then the chunk id make the order total, so equal scores never depend on
+  input order and repeated runs are stable. Scoring is per-pair with no
+  cross-pair interaction, so output is batch-size invariant — asserted in tests
+  rather than assumed.
+* **Failure is fail-visible by default.** A reranker exception propagates
+  unchanged and becomes `status="retrieval_failed"` with the original error type.
+  The only `try`/`except` in `reranked.py` is gated on `config.rerank_fallback`,
+  and an AST guard asserts the handler both re-raises and references that flag,
+  so silent degradation is structurally impossible. When the fallback *is* taken,
+  it sets `rerank_fallback=True`, which surfaces in every trace, in
+  `rerank_fallback_count`, and in the manifest. An empty candidate pool is
+  handled separately and is not a failure: no model invocation happens at all.
+* Cost is recorded per stage. `RetrievalMetadata`, `ExperimentTrace`, and
+  `EfficiencyEvaluator` all carry the candidate-generation / rerank split, and
+  the new efficiency metrics are emitted **only** when a trace carries them, so
+  existing runs' `metrics_efficiency.json` is byte-identical. All new trace and
+  retrieval-metadata fields default to `None`, so previously recorded run
+  directories still validate against the extended schemas.
+* `score_threshold` is **not** forwarded to the base retriever: a first-stage
+  score threshold and a second-stage ranker are different concerns, and applying
+  one here would silently shrink the candidate pool before the ranker ever sees
+  it. The configured value is echoed into metadata for traceability only,
+  mirroring the Phase 4 §4.5 decision. `--rerank-candidate-k` also raises
+  hybrid's own `candidate_k` so one flag controls depth end-to-end.
+* `compare_retrievers.py` stays frozen, and Phase 5 tooling lives in a new
+  `compare_reranking.py` that never auto-discovers a rerank run by glob — a
+  rerank run is only comparable against the exact baseline it was built from.
+* `RerankedRetriever` is deliberately **not** conditional on anything. It never
+  decides whether reranking is worth it, for which query type, or at what
+  candidate depth. Those decisions belong to Phase 6, which remains guard-banned
+  (`adaptive_rout`, `query_classif`, `strategy_select`).
