@@ -110,6 +110,57 @@ class StubRetriever:
         )
 
 
+class FakeReranker:
+    """Deterministic `Reranker` double: canned scores, recorded calls, optional failure.
+
+    Satisfies the `Reranker` protocol with no model, no ONNX session, and no
+    network. Scores come from a fixed table (or a per-passage callable) so tests
+    can assert exact ordering. Every call is recorded, including the batch sizes
+    the wrapper passed down, so batching and call-count behaviour are testable.
+    """
+
+    def __init__(
+        self,
+        scores: Sequence[float] | None = None,
+        *,
+        score_fn: Any = None,
+        constant_score: float = 0.0,
+        raises: BaseException | None = None,
+        version: str = "fake_reranker_v1",
+        model_id: str = "fake-cross-encoder",
+    ):
+        self.scores = list(scores) if scores is not None else None
+        self.score_fn = score_fn
+        self.constant_score = constant_score
+        self.raises = raises
+        self.version = version
+        self.model_id = model_id
+        self.calls: list[dict[str, Any]] = []
+        self.batch_sizes: list[int] = []
+
+    @property
+    def call_count(self) -> int:
+        return len(self.calls)
+
+    @property
+    def scored_passage_count(self) -> int:
+        return sum(call["batch_size"] for call in self.calls)
+
+    def score(self, query: str, passages: Sequence[str]) -> list[float]:
+        batch_size = len(passages)
+        self.calls.append(
+            {"query": query, "batch_size": batch_size, "passages": list(passages)}
+        )
+        self.batch_sizes.append(batch_size)
+        if self.raises is not None:
+            raise self.raises
+        if self.score_fn is not None:
+            return [float(self.score_fn(p)) for p in passages]
+        if self.scores is not None:
+            return [float(s) for s in self.scores]
+        return [float(self.constant_score) for _ in passages]
+
+
 class FakeGenerator:
     """Generates deterministic answers citing retrieved context sources."""
 

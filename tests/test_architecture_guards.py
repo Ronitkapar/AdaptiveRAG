@@ -13,14 +13,16 @@ import tomllib
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = REPO_ROOT / "src" / "adaptive_rag"
 
-# Phase 4 (hybrid/RRF) is implemented; Phase 5+ tokens remain banned.
+# Phase 5 (second-stage reranking) is implemented; Phase 6+ tokens remain banned.
 FORBIDDEN_STRATEGY_TOKENS = (
-    "rerank",
     "adaptive_rout",
     "query_classif",
     "strategy_select",
 )
 FORBIDDEN_HEAVY_DEPS = ("langchain", "llama-index", "llama_index", "sentence-transformers")
+
+# Phase 5 runtime dependencies: ONNX inference only, no torch / transformers.
+REQUIRED_RERANK_DEPS = ("onnxruntime", "tokenizers")
 
 # Tokens that would mean hybrid.py reimplements a strategy it must only compose.
 FORBIDDEN_HYBRID_TOKENS = (
@@ -36,13 +38,47 @@ FORBIDDEN_HYBRID_TOKENS = (
     "idf",
 )
 
+# The second-stage scorer holds no index, no retriever, and no corpus access.
+FORBIDDEN_RERANKER_TOKENS = (
+    "qdrant",
+    "bm25",
+    "idf",
+    "collection",
+)
+FORBIDDEN_RERANKER_IMPORTS = (
+    ".retrieval",
+    ".indexing",
+    ".ingestion",
+    ".chunking",
+)
+
+# The wrapper composes a base retriever and a scorer; it owns neither an index
+# nor a text pipeline. Base-strategy words are permitted only as the method-name
+# literals ("<base>_rerank"), so those are not substring-forbidden here.
+FORBIDDEN_RERANKED_TOKENS = (
+    "qdrant",
+    "idf",
+    "tokenize",
+    "embedding_model",
+    "vector_store",
+    "collection",
+)
+FORBIDDEN_RERANKED_IMPORTS = (
+    "adaptive_rag.retrieval.dense",
+    "adaptive_rag.retrieval.bm25",
+    "adaptive_rag.retrieval.hybrid",
+    "adaptive_rag.retrieval.fusion",
+    "adaptive_rag.indexing",
+    "adaptive_rag.embeddings",
+)
+
 
 def _iter_source_files():
     return sorted(SRC_ROOT.rglob("*.py"))
 
 
 def test_no_future_strategy_symbols_in_source():
-    """Rerank / adaptive-routing symbols must not exist anywhere in src."""
+    """Adaptive-routing symbols must not exist anywhere in src."""
     violations: list[str] = []
     for path in _iter_source_files():
         text = path.read_text(encoding="utf-8").lower()
@@ -65,6 +101,14 @@ def test_no_heavy_framework_dependencies():
         text = path.read_text(encoding="utf-8")
         for token in ("from langchain", "import langchain", "from llama_index", "import llama_index"):
             assert token not in text, f"{path} imports a banned framework"
+
+    # The second-stage scorer must run on ONNX Runtime, not on torch.
+    for dep in REQUIRED_RERANK_DEPS:
+        assert dep in declared, f"required reranking dependency not declared: {dep}"
+    for path in _iter_source_files():
+        text = path.read_text(encoding="utf-8").lower()
+        for token in ("import torch", "from torch", "transformers"):
+            assert token not in text, f"{path} pulls in a banned heavy runtime"
 
 
 def test_provider_isolation_between_generation_and_embeddings():
@@ -143,3 +187,66 @@ def test_no_secrets_committed_in_repo():
     for path in list(_iter_source_files()) + [REPO_ROOT / ".env.example"]:
         text = path.read_text(encoding="utf-8")
         assert not key_pattern.search(text), f"possible secret in {path}"
+
+
+# --- Phase 5 guards --------------------------------------------------------
+
+
+def test_reranker_has_no_index_access():
+    """The second-stage scorer must know nothing about indexes or the corpus."""
+    reranking_dir = SRC_ROOT / "reranking"
+    for path in sorted(reranking_dir.glob("*.py")):
+        text = path.read_text(encoding="utf-8").lower()
+        for token in FORBIDDEN_RERANKER_TOKENS:
+            assert token not in text, f"{path.name} reaches into an index: {token}"
+        for module in FORBIDDEN_RERANKER_IMPORTS:
+            assert module not in text, f"{path.name} imports {module}"
+
+
+def test_reranked_retriever_only_composes():
+    """The wrapper must compose base + scorer, never reach into a concrete strategy."""
+    path = SRC_ROOT / "retrieval" / "reranked.py"
+    if not path.is_file():
+        return
+    raw = path.read_text(encoding="utf-8")
+    text = raw.lower()
+    for token in FORBIDDEN_RERANKED_TOKENS:
+        assert token not in text, f"reranked retriever leaks strategy logic: {token}"
+    for module in FORBIDDEN_RERANKED_IMPORTS:
+        assert module not in text, f"reranked retriever imports {module}"
+
+    # Exactly one fallback handler is permitted, and it may only swallow the
+    # failure when the flag is set: the handler must re-raise otherwise.
+    tree = ast.parse(raw)
+    try_nodes = [n for n in ast.walk(tree) if isinstance(n, ast.Try)]
+    assert len(try_nodes) == 1, "reranked retriever must not add unguarded failure handling"
+    handler = try_nodes[0].handlers[0]
+    handler_nodes = list(ast.walk(handler))
+    assert any(isinstance(n, ast.Raise) for n in handler_nodes), (
+        "the reranking fallback must re-raise when config.rerank_fallback is unset"
+    )
+    assert any(
+        isinstance(n, ast.Attribute) and n.attr == "rerank_fallback" for n in handler_nodes
+    ), "the reranking fallback must be gated on config.rerank_fallback"
+
+
+def test_hybrid_is_independent_of_reranking():
+    """Hybrid must remain unaware that a second stage exists."""
+    path = SRC_ROOT / "retrieval" / "hybrid.py"
+    if not path.is_file():
+        return
+    text = path.read_text(encoding="utf-8").lower()
+    for token in ("rerank", "route", "router"):
+        assert token not in text, f"hybrid retriever couples to reranking: {token}"
+    assert "reranking" not in text, "hybrid retriever imports the reranking package"
+
+
+def test_reranking_does_not_leak_into_retrievers():
+    """No single-strategy or fusion module may mention second-stage scoring."""
+    for name in ("dense.py", "bm25.py", "hybrid.py", "fusion.py"):
+        path = SRC_ROOT / "retrieval" / name
+        if not path.is_file():
+            continue
+        assert "rerank" not in path.read_text(encoding="utf-8").lower(), (
+            f"{name} couples to reranking"
+        )
