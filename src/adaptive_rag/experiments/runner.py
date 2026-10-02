@@ -172,6 +172,9 @@ class ExperimentRunner:
             trace.rerank_candidate_count = meta.candidate_count
             trace.rerank_result_count = meta.result_count
             trace.rerank_fallback = meta.rerank_fallback
+            # Phase 6 routing trace (absent on fixed-strategy runs); copied here so
+            # routing behaviour is queryable from the trace alone.
+            trace.routing = meta.routing
         except Exception as exc:
             trace.status = "retrieval_failed"
             trace.error = ErrorInfo(

@@ -505,6 +505,98 @@ Prompt configuration is versioned.
 
 ---
 
+# 3c. Phase 6 Adaptive Routing
+
+Phase 6 composes a decision layer *above* the fixed strategies. It owns no index,
+no embedding model, no tokenizer, and no ranking logic:
+
+```text
+                         Query
+                            │
+                            ▼
+                  ┌───────────────────────┐
+                  │  QueryFeatureAnalyzer  │  deterministic, no model
+                  │  → QueryFeatures       │
+                  └───────────┬───────────┘
+                              ▼
+                  ┌───────────────────────┐
+                  │    RuleBasedRouter     │  weighted evidence
+                  │  → RoutingDecision     │  (confidence + evidence)
+                  └───────────┬───────────┘
+                              ▼
+              initial retrieval (existing Phase 2–5 Retriever)
+                              │  RetrievalResponse
+                              ▼
+                  ┌───────────────────────┐
+                  │   SufficiencyChecker   │  label-free runtime evidence
+                  └───────────┬───────────┘
+                              │
+                ┌─────────────┴─────────────┐
+                │                           │
+          sufficient                 insufficient
+                │                           │
+                │                  ┌────────▼─────────┐
+                │                  │ EscalationPolicy │  ≤ 1 step,
+                │                  └────────┬─────────┘  strictly stronger
+                │                           ▼
+                │              stronger strategy retrieval
+                └─────────────┬─────────────┘
+                              ▼
+                   RetrievalResponse
+                   retrieval_method="adaptive"
+                   latency_ms = routing + Σ executed stages
+                   routing = RoutingTrace
+                              │
+                              ▼
+       ExperimentRunner → RoutingEvaluator (+ existing evaluators, unchanged)
+```
+
+Guarantees:
+
+* **Composition, not reimplementation.** `adaptive.py` imports no concrete
+  retriever and contains no `try`/`except`; `routing/` may not import `.indexing`,
+  `.ingestion`, `.chunking`, or `.embeddings`. Enforced by architecture guards.
+* **Common protocol.** `AdaptiveRetriever` conforms to `Retriever` and emits a
+  `RetrievalResponse` with `retrieval_method="adaptive"` (paired with
+  `retriever_version="adaptive_v1"`), so the evaluation pipeline stays
+  strategy-agnostic.
+* **Preserved provenance.** The winning stage's results, ranks, scores,
+  metadata, and Phase 5 rerank diagnostics pass through untouched; only routing
+  diagnostics are layered on top.
+* **Honest cost.** `latency_ms` is analysis + routing + every stage that actually
+  ran, so `EfficiencyEvaluator` prices an adaptive run with no special case.
+* **Bounded.** The escalation ladder is a total order, so
+  `BM25 → Dense → Hybrid → BM25` is impossible by construction, not merely
+  untested. `max_escalation_steps` defaults to 1.
+* **Runtime-only decisions.** Sufficiency is judged from the query and the
+  retrieved text; it never reads benchmark labels or evaluation metrics.
+* **Optional metrics.** `RoutingEvaluator` emits nothing when no trace carries
+  routing, so Phase 2–5 runs keep byte-identical artifacts.
+
+---
+
+# 4a. Phase 6 Routing Configuration
+
+`RoutingConfig` holds everything that can change a routing outcome, so it is
+covered by `config_hash` and a run is reproducible from its recorded
+`config.json`:
+
+| Field | Purpose |
+| --- | --- |
+| `available_strategies` | which strategies the router may select |
+| `rule_weights` | strategy → signal group → weight (may be negative) |
+| `enabled_feature_groups` | which of the six signal groups are scored |
+| `strategy_cost_ms` | measured per-strategy latency (Phase 5 §8) |
+| `cost_weight` | quality-vs-cost trade-off knob (0.0 = pure evidence) |
+| `sufficiency_*` | check enablement, threshold, min results, coverage floors |
+| `score_floor` | optional per-strategy floor; `None` by default |
+| `escalation_enabled` / `escalation_ladder` / `max_escalation_steps` | bounded escalation |
+
+Restricting `available_strategies` also restricts which indexes are constructed,
+which is how a BM25-only adaptive run stays fully offline.
+
+---
+
 # 15. Evaluation Architecture
 
 Evaluation is an independent observer.
@@ -613,6 +705,13 @@ On reranked runs the trace additionally carries the second-stage split
 `rerank_candidate_count`, `rerank_result_count`, `rerank_fallback`). All five
 default to `None`, so traces recorded before Phase 5 still validate against the
 schema unchanged.
+
+On adaptive runs the trace additionally carries `routing`, a `RoutingTrace`
+holding the query features, the routing decision with its per-strategy evidence
+and confidence, the initial strategy, its latency and result count, the
+sufficiency decision with every signal, the escalation decision with its reason,
+the final strategy, the per-stage latencies, and the routing overhead. It
+defaults to `None`, so all traces recorded before Phase 6 still validate.
 
 Aggregate metrics should be traceable back to raw results.
 

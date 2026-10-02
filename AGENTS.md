@@ -58,11 +58,12 @@ Current progression:
 * Phase 1 — Corpus Foundation: COMPLETE
 * Phase 2 — Dense RAG Baseline: COMPLETE
 * Phase 3 — BM25: COMPLETE
-* Phase 4 — Hybrid: NEXT
-* Phase 5 — Reranking: FUTURE
-* Phase 6 — Adaptive Routing: FUTURE
+* Phase 4 — Hybrid: COMPLETE
+* Phase 5 — Reranking: COMPLETE
+* Phase 6 — Adaptive Routing: NEXT / IN PROGRESS
+* Phase 7 — Evaluation & Ablations: FUTURE
 
-Do not implement future phases unless explicitly requested.
+Do not implement Phase 7+ functionality unless explicitly requested.
 
 ---
 

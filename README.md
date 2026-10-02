@@ -80,7 +80,7 @@ python3 scripts/validate_corpus.py --manifest-only
 .venv/bin/pytest -q
 ```
 
-57 offline tests cover schemas, config, ingestion, chunking, embeddings cache,
+221 offline tests cover schemas, config, ingestion, chunking, embeddings cache,
 indexing, dense and BM25 retrieval, context, generation, evaluation, the
 experiment runner, determinism, and architecture guards. Live-provider checks
 live outside pytest: `.venv/bin/python scripts/check_providers.py` (needs
@@ -308,3 +308,78 @@ and the three latent defects the live test surfaced are in
 `docs/phases/phase-5.md` §8 and §9.
 
 Full record: [`docs/phases/phase-5.md`](docs/phases/phase-5.md).
+
+---
+
+## Phase 6: Adaptive Routing
+
+Phase 6 adds the adaptive decision layer the earlier phases were built to be
+measured by. It decides **which** existing retrieval strategy a query needs and
+whether the returned evidence justifies spending more — without modifying any
+retrieval algorithm from Phases 2–5.
+
+### Pipeline
+
+```text
+Query → Query Analyzer → Adaptive Router → Initial Retrieval → Sufficiency Check
+                                                     ├── Sufficient → Final Results
+                                                     └── Insufficient → one bounded
+                                                                          escalation
+                                                                          → Stronger Strategy
+                                                                          → Final Results
+```
+
+### Components
+
+| Component | Responsibility |
+| --- | --- |
+| `QueryFeatureAnalyzer` | deterministic, model-free query features |
+| `RuleBasedRouter` | weighted evidence → structured `RoutingDecision` |
+| `SufficiencyChecker` | label-free judgement of retrieved evidence |
+| `EscalationPolicy` | which stronger strategy may follow (total order) |
+| `AdaptiveRetriever` | orchestration only; conforms to `Retriever` |
+| `RoutingEvaluator` | strategy distribution, escalation rate, routing cost |
+
+The router returns a structured decision — strategy, confidence, per-strategy
+evidence, `candidate_k`, `final_top_k`, reranking requirement, and versions — not
+a bare name. Confidence is a normalized score margin, **not** a calibrated
+probability, and never triggers escalation on its own; sufficiency is a separate
+mechanism that inspects the retrieved evidence.
+
+### Bounded by construction
+
+The escalation ladder is a total order from configuration, so `BM25 → Dense →
+Hybrid → BM25` is impossible by construction rather than merely untested, and
+`max_escalation_steps` defaults to 1. An escalated query returns the stronger
+stage's results; the two rankings are never merged, because merging them would be
+a new fusion algorithm.
+
+### Run it
+
+```bash
+# BM25-only adaptive run — fully offline, no credentials needed
+.venv/bin/python scripts/build_bm25_index.py
+.venv/bin/python scripts/run_experiment.py --retriever adaptive \
+    --routing-strategies bm25 --no-judge --no-generation --name adaptive_bm25_v1
+
+# Full four-strategy run (needs AICREDITS_API_KEY for query embeddings)
+.venv/bin/python scripts/run_experiment.py --retriever adaptive \
+    --no-judge --no-generation --name adaptive_v1
+```
+
+`--retriever adaptive --rerank` is rejected: reranking is now a routing decision,
+not a flag.
+
+### Recorded result (BM25-only arm, offline, canonical corpus)
+
+20/20 traces, `retrieval_failed: 0`, Recall@5 **0.7167** — identical to the fixed
+BM25 baseline — at **1.48 ms** mean retrieval latency plus **0.34 ms** routing
+overhead, with a 0.0 escalation rate (every query judged sufficient). The
+escalation path was verified separately against the same index and fires only when
+the threshold judges real evidence insufficient.
+
+Dense, hybrid, and hybrid+reranker arms are **not** validated here: they need
+`AICREDITS_API_KEY` for query embeddings, as in Phases 4–5. Thresholds are
+reasoned defaults, not tuned values — calibration belongs to Phase 7.
+
+Full record: [`docs/phases/phase-6.md`](docs/phases/phase-6.md).

@@ -161,6 +161,66 @@ class FakeReranker:
         return [float(self.constant_score) for _ in passages]
 
 
+class FakeRouter:
+    """Deterministic `Router` double returning canned decisions.
+
+    Satisfies the `Router` protocol so the adaptive orchestration path can be
+    tested without depending on the rule-based weight table. Every call is
+    recorded, so tests can assert the features a decision was derived from --
+    which is what proves the analyzer ran before the router.
+    """
+
+    def __init__(
+        self,
+        decision=None,
+        raises: BaseException | None = None,
+        version: str = "fake_router_v1",
+    ):
+        self.decision = decision
+        self.raises = raises
+        self.version = version
+        self.calls: list[dict[str, Any]] = []
+
+    @property
+    def call_count(self) -> int:
+        return len(self.calls)
+
+    def route(self, features, *, top_k: int):
+        self.calls.append({"features": features, "top_k": top_k})
+        if self.raises is not None:
+            raise self.raises
+        if self.decision is not None:
+            return self.decision
+        raise AssertionError("FakeRouter has no canned decision configured")
+
+
+class FakeAnalyzer:
+    """Deterministic `QueryAnalyzer` double returning fixed features.
+
+    Lets escalation tests drive sufficiency from a chosen query without depending
+    on what the real analyzer infers from the string.
+    """
+
+    def __init__(
+        self,
+        features=None,
+        raises: BaseException | None = None,
+        version: str = "fake_analyzer_v1",
+    ):
+        self.features = features
+        self.raises = raises
+        self.version = version
+        self.calls: list[str] = []
+
+    def analyze(self, query: str):
+        self.calls.append(query)
+        if self.raises is not None:
+            raise self.raises
+        if self.features is not None:
+            return self.features
+        raise AssertionError("FakeAnalyzer has no canned features configured")
+
+
 class FakeGenerator:
     """Generates deterministic answers citing retrieved context sources."""
 

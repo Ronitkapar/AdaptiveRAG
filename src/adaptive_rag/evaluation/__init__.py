@@ -26,6 +26,7 @@ from adaptive_rag.evaluation.generation import (
 )
 from adaptive_rag.evaluation.judge import GroqLLMJudge, JudgeCache, judge_cache_key
 from adaptive_rag.evaluation.retrieval import RetrievalEvaluator
+from adaptive_rag.evaluation.routing import RoutingEvaluator
 
 __all__ = [
     "DEFAULT_DATASET_PATH",
@@ -36,6 +37,7 @@ __all__ = [
     "GroqLLMJudge",
     "JudgeCache",
     "RetrievalEvaluator",
+    "RoutingEvaluator",
     "build_error_breakdown",
     "count_errors",
     "failed_traces",

@@ -16,9 +16,11 @@ from adaptive_rag.schemas.config import (
     IndexConfig,
     IngestionConfig,
     RetrievalConfig,
+    RoutingConfig,
 )
 from adaptive_rag.schemas.generation import GenerationResult, TokenUsage
 from adaptive_rag.schemas.retrieval import RetrievalResponse
+from adaptive_rag.schemas.routing import RoutingTrace
 
 
 class SectionRef(BaseModel):
@@ -101,6 +103,8 @@ class ExperimentTrace(BaseModel):
     rerank_candidate_count: int | None = None
     rerank_result_count: int | None = None
     rerank_fallback: bool | None = None
+    # Phase 6 routing story (absent on fixed-strategy runs)
+    routing: RoutingTrace | None = None
     usage: TokenUsage | None = None
     estimated_cost_usd: float | None = None
     error: ErrorInfo | None = None
@@ -124,6 +128,8 @@ class ExperimentConfig(BaseModel):
     context: ContextConfig
     generation: GenerationConfig
     evaluation: EvaluationConfig
+    # Defaults so pre-Phase-6 configs remain fully valid; the hash still covers it.
+    routing: RoutingConfig = Field(default_factory=RoutingConfig)
     component_versions: dict[str, str] = Field(default_factory=dict)
     config_hash: str
 

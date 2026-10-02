@@ -36,7 +36,7 @@ Evaluation will consider:
 | Phase 3 — BM25                     | COMPLETE                                    |
 | Phase 4 — Hybrid                   | COMPLETE                                    |
 | Phase 5 — Reranking                | COMPLETE                                    |
-| Phase 6 — Adaptive Routing         | NEXT                                        |
+| Phase 6 — Adaptive Routing         | IMPLEMENTATION COMPLETE / OFFLINE VALIDATED |
 | Phase 7 — Evaluation & Ablations   | FUTURE                                      |
 
 ---
@@ -565,3 +565,95 @@ uniformly unprofitable on this corpus at every depth measured, and its cost is
 strongly depth-dependent, so "should we rerank?" and "at what depth?" are
 routinely *no* here. Phase 6 must decide that from query characteristics rather
 than assuming a second stage helps.
+
+---
+
+# Phase 6 — Adaptive Routing
+
+Status: IMPLEMENTATION COMPLETE / OFFLINE VALIDATED
+
+Phase 6 adds the adaptive decision layer that Phases 2–5 were built to be
+measured by. It decides *which* existing retrieval strategy a query needs, and
+whether the returned evidence justifies spending more.
+
+## Implemented
+
+### Routing package (`src/adaptive_rag/routing/`)
+
+* `base.py` — `QueryAnalyzer` and `Router` protocols. `Router.route` consumes
+  `QueryFeatures`, not the raw string, which is what makes a learned router
+  substitutable without changing retrieval.
+* `analyzer.py` — `QueryFeatureAnalyzer`: a deterministic, dependency-free
+  extractor over frozen, version-stamped lexicons. Query length, content terms,
+  lexical density, entity/exact-match indicators (quoted spans, acronyms,
+  CamelCase, identifiers), technical terminology, semantic indicators, question
+  type (10-way), concept count, comparison indicators, and a bounded
+  `complexity_score`. No stemming, no POS tagging, no model, no network.
+* `rule_based.py` — `RuleBasedRouter`: `score = Σ(weight × signal) −
+  cost_weight × normalised_cost`, argmax, deterministic tie-break on
+  `STRATEGY_ORDER`. Every score decomposes into recorded contributions.
+* `sufficiency.py` — `SufficiencyChecker`: `result_count`, `lexical_coverage`,
+  `top1_coverage`, optional per-strategy `score_floor`. Label-free by
+  construction and guard-enforced.
+* `escalation.py` — `EscalationPolicy`: a total-order ladder from configuration.
+  `max_escalation_steps` defaults to 1.
+
+### Adaptive retriever
+
+`retrieval/adaptive.py` — `AdaptiveRetriever`, conforming to the existing
+`Retriever` protocol so the runner and both existing evaluators consume it
+unchanged. Orchestrates the four collaborators; owns no ranking logic and holds
+**zero** `try`/`except` blocks, so a failing strategy surfaces as
+`retrieval_failed` exactly like a failing hybrid branch.
+
+### Contracts and wiring
+
+* `schemas/routing.py` — `QueryFeatures`, `StrategyEvidence`, `RoutingDecision`,
+  `SufficiencySignal`, `SufficiencyDecision`, `EscalationDecision`, `RoutingTrace`.
+* `RoutingConfig` — rule weights, measured cost table, sufficiency thresholds,
+  escalation ladder, and per-group ablation switches, all inside the hashed config.
+* `retrieval_method="adaptive"` ⇔ `adaptive_v1`, as `model_copy` preserves the
+  winning stage's provenance, scores, and rerank diagnostics while layering on
+  the routing trace and adaptive diagnostics.
+* `ExperimentTrace.routing`; one line in the runner copies it.
+* `RoutingEvaluator`, emitting metrics **only** when traces carry routing, so
+  fixed-strategy runs stay byte-identical.
+* `run_experiment.py --retriever adaptive` plus routing flags;
+  `--retriever adaptive --rerank` is rejected, because reranking is now a routing
+  decision rather than a flag.
+
+## Validation
+
+* **221 offline deterministic tests pass** (140 pre-existing + 83 new), 2
+  integration-marked deselected, **14/14 architecture guards** green.
+* A real offline adaptive run over the canonical 713-document BM25 index with no
+  credentials and no network: 20/20 traces, `retrieval_failed: 0`, Recall@5
+  **0.7167** — identical to the fixed BM25 baseline — at **1.48 ms** mean
+  retrieval latency plus **0.34 ms** routing overhead. The escalation path was
+  separately verified against the same index and correctly fires only when the
+  threshold judges real evidence insufficient.
+* **Backward compatibility:** all **220** pre-Phase-6 traces across the recorded
+  Phase 1–5 runs still validate with `routing is None`, and the recorded
+  `metrics.json` files contain no routing section.
+
+## Findings and limitations
+
+* Thresholds (`sufficiency_threshold=0.5`, `cost_weight=0.25`) are reasoned
+  defaults, **not** tuned values. Calibrating them against labels is Phase 7
+  Ablation 3 work; Phase 6 records the limitation rather than implying optimality.
+* The dense, hybrid, and hybrid+reranker arms are **unvalidated here** — this
+  environment has no network and those arms need `AICREDITS_API_KEY` for query
+  embeddings, as in Phases 4–5. Only the BM25-only arm was executed.
+* The rule table is hand-designed. A learned router is designed for but not
+  implemented; training belongs to Phase 7.
+
+## Next steps
+
+> Phase 7 — Evaluation & Ablations
+
+Phase 7 owns the adaptive-vs-fixed comparison, the ablation program
+(fixed vs adaptive, query-only vs feedback, no-escalation vs bounded escalation,
+rule-based vs learned, and signal-group ablations), failure-mode analysis, and
+threshold calibration. Phase 6 deliberately implements none of it: the current
+phase is the adaptive mechanism itself — correct, testable, observable, and
+runnable.

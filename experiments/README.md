@@ -114,3 +114,58 @@ every trace so the degradation is visible rather than silent.
 
 `compare_retrievers.py` is unchanged by Phase 5 and remains the dense-vs-BM25
 (plus optional hybrid) table. Use `compare_reranking.py` for reranked runs.
+
+---
+
+## Running adaptive retrieval (Phase 6)
+
+`--retriever adaptive` routes each query to BM25, dense, hybrid, or
+hybrid+reranker, then escalates **once** if the retrieved evidence looks
+insufficient. It uses the same config, runner, and evaluators as the fixed
+strategies, and adds a `metrics_routing.json` report.
+
+```bash
+# BM25-only adaptive run — fully offline, no credentials needed
+# (build the index first; this is the one arm that needs nothing else)
+.venv/bin/python scripts/build_bm25_index.py
+.venv/bin/python scripts/run_experiment.py --retriever adaptive \
+    --routing-strategies bm25 --no-judge --no-generation --name adaptive_bm25_v1
+
+# Full four-strategy run — needs AICREDITS_API_KEY for query embeddings,
+# exactly as Phase 4/5's dense and hybrid runs do
+.venv/bin/python scripts/run_experiment.py --retriever adaptive \
+    --no-judge --no-generation --name adaptive_v1
+
+# Ablation switches (Phase 6 exposes the levers; Phase 7 runs the study)
+.venv/bin/python scripts/run_experiment.py --retriever adaptive --no-escalation \
+    --name adaptive_no_escalation_v1 --no-judge --no-generation
+.venv/bin/python scripts/run_experiment.py --retriever adaptive --no-sufficiency \
+    --name adaptive_no_sufficiency_v1 --no-judge --no-generation
+.venv/bin/python scripts/run_experiment.py --retriever adaptive \
+    --disable-feature-group semantic --disable-feature-group entity \
+    --name adaptive_no_signals_v1 --no-judge --no-generation
+.venv/bin/python scripts/run_experiment.py --retriever adaptive \
+    --routing-cost-weight 0.0 --name adaptive_pure_evidence_v1 --no-judge --no-generation
+```
+
+`--routing-strategies` restricts both what the router may select *and* which
+indexes are built, so narrowing it to `bm25` keeps a run fully offline. The
+escalation ladder narrows to match automatically unless `--routing-ladder` is
+given.
+
+`--retriever adaptive --rerank` is rejected on purpose: second-stage scoring is
+one of the strategies the router selects, so the flag would silently override the
+routing decision.
+
+Routing metrics appear only in adaptive runs:
+
+```text
+escalation_rate             fraction of queries that escalated
+rerank_rate                 fraction whose final stage included reranking
+insufficient_initial_rate   fraction whose first stage looked insufficient
+routing_confidence_mean     normalized score margin (not a probability)
+retrieval_stages_mean       mean number of stages executed
+routing_latency_ms_mean     analysis + routing overhead
+escalated_retrieval_latency_ms_mean / non_escalated_retrieval_latency_ms_mean
+initial_strategy_distribution / final_strategy_distribution
+```

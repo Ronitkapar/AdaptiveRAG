@@ -5,6 +5,8 @@ schemas package initialization.
 from adaptive_rag.schemas.chunk import Chunk, ChunkingMetadata, ChunkMetadata, ChunkProvenance
 from adaptive_rag.schemas.config import (
     BM25RetrievalConfig,
+    FEATURE_GROUPS,
+    STRATEGY_ORDER,
     ChunkingConfig,
     ContextConfig,
     DenseRetrievalConfig,
@@ -16,6 +18,8 @@ from adaptive_rag.schemas.config import (
     IngestionConfig,
     RerankerConfig,
     RetrievalConfig,
+    RoutingConfig,
+    StrategyName,
 )
 from adaptive_rag.schemas.document import (
     Document,
@@ -41,6 +45,16 @@ from adaptive_rag.schemas.experiment import (
 )
 from adaptive_rag.schemas.generation import ContextChunk, GenerationRequest, GenerationResult, TokenUsage
 from adaptive_rag.schemas.retrieval import RetrievalMetadata, RetrievalResponse, RetrievalResult
+from adaptive_rag.schemas.routing import (
+    EscalationDecision,
+    QueryFeatures,
+    QuestionType,
+    RoutingDecision,
+    RoutingTrace,
+    StrategyEvidence,
+    SufficiencyDecision,
+    SufficiencySignal,
+)
 
 __all__ = [
     "BM25RetrievalConfig",
@@ -59,6 +73,7 @@ __all__ = [
     "ElementType",
     "EmbeddingConfig",
     "ErrorInfo",
+    "EscalationDecision",
     "EvaluationConfig",
     "EvaluationExample",
     "EvaluationReport",
@@ -66,6 +81,7 @@ __all__ = [
     "ExperimentTrace",
     "ExtractionIssue",
     "ExtractionReport",
+    "FEATURE_GROUPS",
     "GenerationConfig",
     "GenerationRequest",
     "GenerationResult",
@@ -75,13 +91,23 @@ __all__ = [
     "MetricValue",
     "Page",
     "Provenance",
+    "QueryFeatures",
+    "QuestionType",
     "ReferenceInfo",
     "RerankerConfig",
     "RetrievalConfig",
     "RetrievalMetadata",
     "RetrievalResponse",
     "RetrievalResult",
+    "RoutingConfig",
+    "RoutingDecision",
+    "RoutingTrace",
+    "STRATEGY_ORDER",
     "Section",
     "SectionRef",
+    "StrategyEvidence",
+    "StrategyName",
+    "SufficiencyDecision",
+    "SufficiencySignal",
     "TokenUsage",
 ]

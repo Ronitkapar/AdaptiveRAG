@@ -513,3 +513,144 @@ not as a new retrieval strategy of its own:
   decides whether reranking is worth it, for which query type, or at what
   candidate depth. Those decisions belong to Phase 6, which remains guard-banned
   (`adaptive_rout`, `query_classif`, `strategy_select`).
+
+---
+
+## ADR-021 — Phase 6 Is an Adaptive Decision and Orchestration Layer
+
+Status: ACCEPTED
+
+Phase 6 decides **when** each existing retrieval capability is used and when
+additional retrieval computation is justified. It does not:
+
+* rewrite dense retrieval, BM25, hybrid/RRF, or the reranker
+* introduce a new vector database or a new retrieval algorithm
+* introduce a general-purpose agent framework or unbounded retrieval loops
+* read ground-truth relevance labels at query time
+
+`src/adaptive_rag/retrieval/adaptive.py` contains **zero** `try`/`except`
+blocks and no `retrieval/dense.py`, `.bm25`, `.hybrid`, `.reranked`, or
+`.fusion` imports; `src/adaptive_rag/routing/` may not import `.indexing`,
+`.ingestion`, `.chunking`, or `.embeddings`. Each constraint is enforced by an
+AST/import guard in `tests/test_architecture_guards.py`, not by convention.
+
+Routing decisions are **bounded**: at most one escalation, chosen from a total
+order. This keeps per-query cost measurable and prevents the adaptive layer from
+degenerating into an unbounded retrieval agent.
+
+---
+
+## ADR-022 — Routing Is a Structured Decision, and `adaptive` Is a Pipeline Identity
+
+Status: ACCEPTED
+
+A router returns a `RoutingDecision`, never a bare strategy name. It carries the
+selected strategy, confidence, per-strategy evidence with weighted contributions,
+`candidate_k`, `final_top_k`, the reranking requirement, the router/analyzer
+versions, enabled and disabled signal groups, the cost weight, and routing
+metadata. The decision is therefore reproducible, loggable, and comparable
+between router implementations.
+
+`RoutingConfig` holds the rule weights, the measured cost table, the sufficiency
+thresholds, and the escalation ladder. Everything that can change a routing
+outcome lives in the hashed configuration, so a run is reproducible from its
+recorded `config.json`.
+
+`RetrievalResponse.retrieval_method` gains the `adaptive` literal, paired with
+`retriever_version="adaptive_v1"`, preserving the existing ⇔ invariant. As with
+Phase 5's `hybrid_rerank`, the method names the **whole pipeline** rather than its
+head: results, ranks, scores, provenance, and the rerank diagnostics come from
+the winning stage unchanged, while the routing trace records what actually ran.
+The response's `latency_ms` is the true end-to-end cost — analysis, routing, and
+every stage executed — so `EfficiencyEvaluator` prices an adaptive run with no
+special-casing.
+
+The router decides **what** runs; the selected retriever decides **how**. The
+runner change is a single line copying `metadata.routing` into the trace.
+
+---
+
+## ADR-023 — Routing Confidence Is Not a Calibrated Probability, and Does Not Gate Sufficiency
+
+Status: ACCEPTED
+
+`RoutingDecision.confidence` is the normalized margin between the winning and
+runner-up strategy scores, in `[0, 1]`. It expresses how strongly the available
+evidence supports the selected strategy. It is **not** a probability, no
+calibration is performed, and it must not be treated as one. A single available
+strategy yields `0.0`, because there was no evidence to discriminate on.
+
+Confidence never triggers escalation on its own. Escalation requires a separate,
+evidence-based judgement from `SufficiencyChecker`, which inspects the retrieved
+results themselves. Keeping the two separate is deliberate: a router can be
+confidently wrong, and retrieval can fail quietly regardless of how confident the
+router was.
+
+---
+
+## ADR-024 — Sufficiency Is Judged at Query Time from Retrieved Evidence Alone
+
+Status: ACCEPTED
+
+`SufficiencyChecker` answers "was the retrieved evidence enough?" using signals
+available at query time — result count, lexical coverage of query content terms in
+the returned text, and top-1 coverage. It never reads benchmark labels, held-out
+relevance judgements, reference answers, or evaluation metrics; those do not exist
+outside an experiment, and a check that depended on them would look excellent
+offline while being meaningless in production. `tests/test_architecture_guards.py`
+enforces this by banning label identifiers in `routing/sufficiency.py`.
+
+There is **no global score floor** by default. BM25 magnitudes, cosine
+similarity, RRF scores, and cross-encoder logits live on incomparable scales, so
+a single threshold across strategies would be an invented number rather than a
+measured one. `RoutingConfig.score_floor` remains available for a per-strategy
+threshold that has actually been measured.
+
+The default `sufficiency_threshold` (0.5) is a reasoned default, **not** a tuned
+value. Calibrating it against labels is Phase 7 work (Ablation 3); Phase 6
+records the limitation rather than implying the threshold is optimal.
+
+---
+
+## ADR-025 — Escalation Follows a Total-Order Ladder Drawn from Configuration
+
+Status: ACCEPTED
+
+The escalation ladder is a total order over strategies, taken from
+`RoutingConfig.escalation_ladder` rather than scattered per-strategy transition
+rules. A strategy therefore has exactly one successor, or none at the top rung.
+
+This makes the forbidden
+
+```text
+BM25 → Dense → Hybrid → BM25 → …
+```
+
+impossible **by construction**, not merely untested. `RoutingConfig` rejects a
+ladder containing duplicates, naming an unavailable strategy, or exceeding the
+reachable range, and `EscalationPolicy` re-validates it at construction.
+
+`max_escalation_steps` defaults to **1**: one bounded escalation per query. An
+escalated query returns the stronger stage's results and does **not** merge the
+two rankings — merging two rankings is a new fusion algorithm belonging to Phase
+4's concerns, not to an orchestration layer. A one-rung ladder has nowhere to
+escalate, so the validator couples the ladder length to the step bound.
+
+---
+
+## ADR-026 — The Router Is an Interface, and the Learned Router Is Deferred
+
+Status: ACCEPTED
+
+`Router.route(features, *, top_k) -> RoutingDecision` takes `QueryFeatures`
+rather than the raw query string. A learned router can therefore implement the
+same protocol and be substituted without changing retrieval, sufficiency, or
+escalation — which is what makes the rule-based-versus-learned comparison an
+experiment about the router alone.
+
+Phase 6 implements only the rule-based router, and **no ML classifier is
+trained**. `QueryFeatureAnalyzer` is deliberately not linguistic analysis: no
+stemming, part-of-speech tagging, or parsing. It counts surface cues with frozen,
+version-stamped lexicons, keeping analysis cheap, deterministic, and
+interpretable. Learned-router training and routing-dataset generation belong to
+Phase 7.
