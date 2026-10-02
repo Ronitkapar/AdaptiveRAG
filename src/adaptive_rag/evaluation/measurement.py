@@ -362,6 +362,7 @@ def build_artifact(
     repetitions: int = DEFAULT_REPETITIONS,
     adaptive: Mapping[str, Any] | None = None,
     incomplete_reason: str | None = None,
+    pace_seconds: float = 0.0,
 ) -> dict[str, Any]:
     """Assemble the `strategy_cost_ms.json` artifact.
 
@@ -393,6 +394,13 @@ def build_artifact(
             ),
             "stdev_definition": "sample standard deviation, ddof=1",
             "excluded_from_table": ["adaptive"],
+            "pace_seconds": pace_seconds,
+            "pace_note": (
+                "Sleep between queries on provider-calling arms, to avoid "
+                "tripping the embedding API rate limit. Applied between "
+                "timed retrievals, never inside one, so it cannot enter "
+                "any latency_ms."
+            ),
         },
         "provenance": dict(provenance),
         "environment": dict(environment),

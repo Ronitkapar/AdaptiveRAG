@@ -120,6 +120,33 @@ COST_CLOCK_FIELDS = (
     "rerank_latency_ms",
 )
 
+# Pacing between queries, in seconds. See `_pace` for why this exists and why it
+# cannot bias a measurement.
+DEFAULT_PACE_SECONDS = 0.75
+
+# Arms that issue a live query-embedding call per query. BM25 is local and needs
+# no pacing; `adaptive` is included because it may route into a dense-capable
+# strategy at query time, so whether it calls the provider is not knowable here.
+NETWORK_ARMS = frozenset({"dense", "hybrid", "hybrid_rerank", "adaptive"})
+
+
+def _pace(arm: str, pace_seconds: float) -> None:
+    """Sleep between queries for arms that call the embedding provider.
+
+    Three of the four costed strategies embed every query remotely, so the
+    protocol issues roughly `3 x queries x repetitions` calls in a burst. That
+    burst reliably trips the provider's rate limit part-way through a sweep --
+    a first attempt died at repetition 5/5 on HTTP 429 -- and the adapter's
+    `2 ** attempt` backoff over `max_retries=4` is not enough to ride it out.
+
+    The sleep sits *between* timed retrievals, never inside one, so it cannot
+    enter any `latency_ms`. It changes request spacing only; the measured
+    quantity, the sample count, the rotation, and the estimator are untouched.
+    It is recorded in the artifact so a reader knows the sweep was paced.
+    """
+    if pace_seconds > 0 and arm in NETWORK_ARMS:
+        time.sleep(pace_seconds)
+
 
 def _sample_from(strategy: str, example: Any, repetition: int, response: Any) -> CostSample:
     """Build one sample from a retrieval response.
@@ -202,6 +229,7 @@ def run_sweep(
     repetitions: int,
     warmup: int,
     arm_names: Sequence[str],
+    pace_seconds: float = DEFAULT_PACE_SECONDS,
 ) -> dict[str, Any]:
     """Execute the protocol and return the artifact."""
     examples = load_evaluation_dataset(dataset_path)
@@ -234,6 +262,7 @@ def run_sweep(
         for handle in opened.values():
             for example in warm_set:
                 handle["retriever"].retrieve(example.query, top_k=top_k)
+                _pace("warmup", pace_seconds)
 
         samples: list[CostSample] = []
         adaptive_samples: list[float] = []
@@ -243,6 +272,7 @@ def run_sweep(
                 # Rotating the query order stops first-position effects inside a
                 # pass from loading onto the same queries every repetition.
                 for example in sample_order(query_set, repetition):
+                    _pace(name, pace_seconds)
                     response = retriever.retrieve(example.query, top_k=top_k)
                     if name == "adaptive":
                         # Recorded as its own observation; the adaptive arm's cost
@@ -318,6 +348,7 @@ def run_sweep(
             repetitions=repetitions,
             adaptive=adaptive_observed,
             incomplete_reason=table_error,
+            pace_seconds=pace_seconds,
         )
         artifact["strategies"] = [
             s for s in artifact["strategies"] if s["n"] > 0
@@ -399,6 +430,15 @@ def main() -> int:
         "--out", type=Path,
         default=REPO_ROOT / "experiments" / "phase7" / "strategy_cost_ms.json",
     )
+    parser.add_argument(
+        "--pace",
+        type=float,
+        default=DEFAULT_PACE_SECONDS,
+        help=(
+            "Seconds to sleep between queries on provider-calling arms, to "
+            "avoid the embedding API rate limit. 0 disables pacing."
+        ),
+    )
     parser.add_argument("--json-only", action="store_true")
     args = parser.parse_args()
 
@@ -408,6 +448,7 @@ def main() -> int:
         repetitions=args.repetitions,
         warmup=args.warmup,
         arm_names=[name.strip() for name in args.arms.split(",") if name.strip()],
+        pace_seconds=args.pace,
     )
 
     args.out.parent.mkdir(parents=True, exist_ok=True)

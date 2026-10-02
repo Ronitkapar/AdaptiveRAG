@@ -423,3 +423,67 @@ def test_summarize_all_returns_strategies_in_cost_order():
          for s in _samples(name, [1.0, 2.0])]
     )
     assert [s.strategy for s in summaries] == list(COST_STRATEGIES)
+
+# --- provider pacing between queries -----------------------------------------
+
+
+def test_pace_sleeps_only_on_provider_calling_arms(monkeypatch):
+    """BM25 is local; the other arms embed every query remotely.
+
+    Pacing the local arm would waste sweep wall-clock for no benefit, and
+    skipping the networked arms is what let a sweep trip the provider's rate
+    limit at repetition 5/5.
+    """
+    import importlib.util
+    from pathlib import Path
+
+    spec = importlib.util.spec_from_file_location(
+        "_msc", Path(__file__).resolve().parents[1] / "scripts" / "measure_strategy_cost.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    slept: list[float] = []
+    monkeypatch.setattr(module.time, "sleep", lambda s: slept.append(s))
+
+    for arm in ("bm25",):
+        module._pace(arm, 0.75)
+    assert slept == [], "paced the local BM25 arm"
+
+    for arm in ("dense", "hybrid", "hybrid_rerank", "adaptive"):
+        module._pace(arm, 0.75)
+    assert slept == [0.75] * 4, slept
+
+
+def test_pace_is_disabled_by_zero(monkeypatch):
+    """`--pace 0` restores the unpaced protocol exactly."""
+    import importlib.util
+    from pathlib import Path
+
+    spec = importlib.util.spec_from_file_location(
+        "_msc", Path(__file__).resolve().parents[1] / "scripts" / "measure_strategy_cost.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    slept: list[float] = []
+    monkeypatch.setattr(module.time, "sleep", lambda s: slept.append(s))
+
+    module._pace("dense", 0.0)
+    assert slept == []
+
+
+def test_artifact_records_the_pacing_it_ran_with():
+    """A reader must be able to see the sweep was paced."""
+    summaries = _all_strategies()
+    artifact = build_artifact(
+        summaries,
+        proposed=proposed_cost_table(summaries),
+        current={"bm25": 1.0, "dense": 2.0, "hybrid": 3.0, "hybrid_rerank": 4.0},
+        environment={},
+        provenance={},
+        pace_seconds=0.75,
+    )
+
+    assert artifact["protocol"]["pace_seconds"] == 0.75
+    assert "rate limit" in artifact["protocol"]["pace_note"]
