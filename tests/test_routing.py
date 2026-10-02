@@ -36,6 +36,7 @@ from adaptive_rag.routing import (
     SufficiencyChecker,
 )
 from adaptive_rag.schemas import (
+    Chunk,
     ChunkMetadata,
     ChunkProvenance,
     RetrievalConfig,
@@ -1025,3 +1026,147 @@ def test_adaptive_real_index_surfaces_the_expected_document():
     )
     ids = {r.chunk_id for r in adaptive.retrieve("Robertson BM25 scoring", top_k=10).results}
     assert any("bm25" in chunk_id for chunk_id in ids)
+
+
+# --- shared Qdrant client reuse (Phase 7 cost sweep) -------------------------
+
+
+def _client_probe_index(index):
+    """A BM25Index stand-in whose `load` returns `index`."""
+    return type(
+        "_Index",
+        (),
+        {"load": staticmethod(lambda expected_corpus_version=None: index)},
+    )
+
+
+@pytest.fixture
+def client_probe_chunks() -> list:
+    """Minimal chunks for the shared-client probes below."""
+    from adaptive_rag.schemas import ChunkingMetadata
+
+    texts = [
+        "Okapi BM25 ranks documents by saturated term frequency.",
+        "Dense retrieval encodes queries into a shared vector space.",
+        "Reciprocal rank fusion merges uncalibrated ranked lists.",
+        "Reranking applies a cross-encoder to retrieved candidates.",
+    ]
+    return [
+        Chunk(
+            chunk_id=f"doc{i}::structure_aware_v1::c{i:05d}",
+            document_id=f"doc{i}",
+            text=text,
+            metadata=ChunkMetadata(
+                document_id=f"doc{i}",
+                doc_title=f"doc{i}",
+                section_path=["1. Section"],
+                headings=["Section"],
+                element_ids=[f"e{i}"],
+                element_types=["paragraph"],
+                page_start=1,
+                page_end=1,
+                token_count=len(text.split()),
+                char_count=len(text),
+            ),
+            provenance=ChunkProvenance(
+                document_id=f"doc{i}", pages=[1], source_sha256="sha123"
+            ),
+            chunking_metadata=ChunkingMetadata(
+                chunking_version="structure_aware_v1", config_hash="cfg", ordinal=i
+            ),
+        )
+        for i, text in enumerate(texts)
+    ]
+
+
+def _client_probe_store(seen):
+    """A QdrantVectorStore stand-in recording the client it was handed."""
+    return type(
+        "_Store",
+        (),
+        {
+            "__init__": lambda self, config=None, client=None: seen.append(client),
+            "close": lambda self: None,
+        },
+    )
+
+
+def _two_strategy_adaptive_config():
+    from adaptive_rag.experiments import config as exp_config
+
+    return exp_config.build_experiment_config(
+        name="adaptive_client_reuse_v1",
+        retrieval=RetrievalConfig(retrieval_method="adaptive"),
+        routing=RoutingConfig(
+            available_strategies=["bm25", "dense"],
+            escalation_ladder=["bm25", "dense"],
+        ),
+        corpus_version="corpus_test",
+    )
+
+
+def test_adaptive_branch_reuses_an_injected_qdrant_client(monkeypatch, client_probe_chunks):
+    """The adaptive arm must not open a second embedded client.
+
+    Local Qdrant mode takes an exclusive lock on the storage folder. The Phase 7
+    cost sweep builds every arm up front and injects one shared client, so the
+    adaptive branch opening its own fails the entire sweep with `AlreadyLocked`.
+    Asserting the *identity* of the client each strategy receives catches a
+    regression a build-success assertion would miss, because a fake store
+    accepts any object.
+    """
+    from adaptive_rag.experiments import config as exp_config
+    from adaptive_rag.indexing.bm25 import BM25Index
+    from adaptive_rag.schemas import Chunk
+    from tests.fakes import FakeEmbeddingModel
+
+    index = BM25Index(corpus_version="corpus_test")
+    index.build_from_chunks(client_probe_chunks, corpus_version="corpus_test")
+
+    seen: list[object] = []
+    sentinel = object()
+
+    def _fail(*_args, **_kwargs):
+        raise AssertionError(
+            "adaptive opened its own Qdrant client instead of reusing the injected one"
+        )
+
+    monkeypatch.setattr(exp_config, "BM25Index", _client_probe_index(index))
+    monkeypatch.setattr(exp_config, "QdrantVectorStore", _client_probe_store(seen))
+    monkeypatch.setattr(
+        exp_config, "AICreditsEmbeddingModel", lambda config=None: FakeEmbeddingModel()
+    )
+    monkeypatch.setattr(exp_config, "_shared_qdrant_client", _fail)
+
+    exp_config.instantiate_components(_two_strategy_adaptive_config(), client=sentinel)
+
+    assert seen, "no vector store was constructed for the adaptive arm"
+    assert all(client is sentinel for client in seen), seen
+
+
+def test_adaptive_branch_opens_its_own_client_when_none_is_injected(
+    monkeypatch, client_probe_chunks
+):
+    """Single-arm callers, such as the environment gate, still get their own."""
+    from adaptive_rag.experiments import config as exp_config
+    from adaptive_rag.indexing.bm25 import BM25Index
+    from adaptive_rag.schemas import Chunk
+    from tests.fakes import FakeEmbeddingModel
+
+    index = BM25Index(corpus_version="corpus_test")
+    index.build_from_chunks(client_probe_chunks, corpus_version="corpus_test")
+
+    seen: list[object] = []
+    own = object()
+
+    monkeypatch.setattr(exp_config, "BM25Index", _client_probe_index(index))
+    monkeypatch.setattr(exp_config, "QdrantVectorStore", _client_probe_store(seen))
+    monkeypatch.setattr(
+        exp_config, "AICreditsEmbeddingModel", lambda config=None: FakeEmbeddingModel()
+    )
+    monkeypatch.setattr(exp_config, "_shared_qdrant_client", lambda: own)
+
+    exp_config.instantiate_components(_two_strategy_adaptive_config())
+
+    assert seen, "no vector store was constructed for the adaptive arm"
+    assert all(client is own for client in seen), seen

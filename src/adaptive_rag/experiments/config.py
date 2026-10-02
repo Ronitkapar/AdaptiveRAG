@@ -323,7 +323,12 @@ def instantiate_components(config: ExperimentConfig, client: Any = None):
     ingestion_pipeline = IngestionPipeline(config=config.ingestion)
 
     if config.retrieval.retrieval_method == "adaptive":
-        shared_client = _shared_qdrant_client()
+        # Honour an injected client rather than always opening a second one. A
+        # caller that builds several arms at once (the Phase 7 cost sweep) is
+        # already holding the exclusive local-mode lock, so opening another here
+        # fails outright with `AlreadyLocked`. Single-arm callers pass None and
+        # still get a client of their own.
+        shared_client = client if client is not None else _shared_qdrant_client()
         builders = {
             "bm25": lambda: _build_bm25(config, config.retrieval, shared_client),
             "dense": lambda: _build_dense(config, config.retrieval, shared_client),
