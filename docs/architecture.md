@@ -586,7 +586,7 @@ covered by `config_hash` and a run is reproducible from its recorded
 | `available_strategies` | which strategies the router may select |
 | `rule_weights` | strategy → signal group → weight (may be negative) |
 | `enabled_feature_groups` | which of the six signal groups are scored |
-| `strategy_cost_ms` | measured per-strategy latency (Phase 5 §8) |
+| `strategy_cost_ms` | measured per-strategy latency (Phase 7 §7.0b, n=100 medians) |
 | `cost_weight` | quality-vs-cost trade-off knob (0.0 = pure evidence) |
 | `sufficiency_*` | check enablement, threshold, min results, coverage floors |
 | `score_floor` | optional per-strategy floor; `None` by default |

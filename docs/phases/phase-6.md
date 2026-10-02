@@ -244,15 +244,16 @@ untouched.
 * **Thresholds are uncalibrated.** `sufficiency_threshold=0.5` and
   `cost_weight=0.25` are reasoned defaults, not tuned values. Calibrating them
   against labels is Phase 7 work (Ablation 3).
-* **Dense/hybrid arms are unvalidated here.** This environment has no network,
-  and those arms need `AICREDITS_API_KEY` for query embeddings, as in Phases
-  4–5. Only the BM25-only arm was executed.
+* **The cost table was Phase 5's numbers on this corpus**, not a general model.
+  *Superseded in Phase 7 §7.0b:* re-measured at n=100 per arm under a
+  warm-up-and-rotation protocol. The Phase 5 seed was a single pass of means with
+  no warm-up, and the gate later observed a wider dense-latency swing than the
+  dense/hybrid gap it encoded.
 * **The rule table is hand-designed**, not learned. A learned router is designed
   for (§4.1) but not implemented.
-* **The cost table is Phase 5's numbers on this corpus**, not a general model.
 * Adaptive builds the dense store whenever dense/hybrid are available, so it
-  pays index load at startup even when routing to BM25 — but not dense's ~621 ms
-  per query.
+  pays index load at startup even when routing to BM25 — but not dense's
+  per-query cost.
 
 ---
 

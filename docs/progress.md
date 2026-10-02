@@ -37,7 +37,7 @@ Evaluation will consider:
 | Phase 4 — Hybrid                   | COMPLETE                                    |
 | Phase 5 — Reranking                | COMPLETE                                    |
 | Phase 6 — Adaptive Routing         | IMPLEMENTATION COMPLETE / OFFLINE VALIDATED |
-| Phase 7 — Evaluation & Ablations   | FUTURE                                      |
+| Phase 7 — Evaluation & Ablations   | IN PROGRESS (7.0a gate, 7.0b cost freeze complete) |
 
 ---
 
@@ -647,13 +647,143 @@ unchanged. Orchestrates the four collaborators; owns no ranking logic and holds
 * The rule table is hand-designed. A learned router is designed for but not
   implemented; training belongs to Phase 7.
 
+---
+
+# Phase 7 — Evaluation & Ablations
+
+Status: IN PROGRESS — 7.0a environment gate and 7.0b strategy-cost freeze complete
+
+Phase 7 evaluates whether adaptive routing actually earns its complexity. This
+entry covers the foundation work completed so far; the evaluation and ablation
+program itself has not started.
+
+## 7.0a Environment gate — COMPLETE
+
+`scripts/validate_environment.py` probes all five arms against the canonical
+corpus before any measurement is trusted, writing `experiments/phase7/gate.json`.
+
+Result on this machine (commit `9db5054`): **5/5 PASS, gate open.** Every arm
+returned well-formed, deterministic responses — `bm25`, `dense`, `hybrid`,
+`hybrid_rerank`, and `adaptive` — with empty `problems` and identical rankings
+across two identical calls.
+
+The gate checks response *format* rather than quality: non-empty results, finite
+and non-negative latency clocks, matching `top_k`, and populated
+`corpus_version`/`retriever_version`. A missing clock is a hard failure rather
+than a `0.0`, because a zero would silently flatter whichever arm produced it in
+any later percentile.
+
+This also retired the standing limitation carried from Phases 4–6 that the
+dense, hybrid, and reranked arms were unvalidated for want of network. They are
+now exercised live. `experiments/phase7/` is gitignored like every other run
+output, so provenance travels inside the artifact rather than in the repo.
+
+## 7.0b Strategy-cost re-measurement — COMPLETE
+
+### Why
+
+`RoutingConfig.strategy_cost_ms` is the router's price list, and
+`RuleBasedRouter._normalised_costs` divides each strategy's cost by the maximum
+across available strategies. The router therefore consumes the **ratios**, which
+makes the table unusually sensitive to measurement error. The Phase 5 seed came
+from per-query means over 20 examples in a single pass, with no warm-up and no
+repetitions, and the gate then observed dense retrieval swinging between roughly
+### Protocol
+
+Defined in `evaluation/measurement.py`, executed by
+`scripts/measure_strategy_cost.py`:
+
+1. Build every component before any clock starts.
+2. Warm up each arm and **discard** those samples, paying the ONNX session's
+   first-call cost.
+3. Run 5 repetitions of all 20 queries per arm, rotating both arm order and
+   query order between repetitions so neither machine drift nor query position
+   loads onto one strategy.
+4. Aggregate with `statistics.median`; p95 is nearest-rank
+   (`evaluation.base.percentile`, no interpolation), so at n=100 it is literally
+   the 95th observed sample.
+
+The adaptive arm is measured and reported but deliberately excluded from the
+table: its cost is a per-query mixture of the others decided at runtime.
+
+### Results (n=100 per arm)
+
+| Strategy | p50 (ms) | p95 (ms) | stdev | p95/p50 |
+| --- | --- | --- | --- | --- |
+| `bm25` | 2.25 | 5.14 | 1.60 | 2.28 |
+| `dense` | 451.78 | 744.64 | 129.13 | 1.65 |
+| `hybrid` | 455.97 | 923.42 | 1373.66 | 2.03 |
+| `hybrid_rerank` | 3854.41 | 4389.73 | 1068.51 | 1.14 |
+
+Frozen into `RoutingConfig.strategy_cost_ms` after review, replacing the Phase 5
+seed. Raw samples travel with the artifact so every aggregate can be recomputed
+without a re-run.
+
+### Findings
+
+* **The embedding API dominates the "retrieval" cost.** The per-stage breakdown
+  shows dense's 451.78 ms median is ~426 ms of live `text-embedding-3-large`
+  call and only ~24 ms of actual vector search. Hybrid is the same shape
+  (~450 ms dense branch, ~29 ms BM25). The frozen table therefore prices a
+  *network round-trip*, not a retrieval algorithm, and its ratios move if the
+  provider's latency or quota changes.
+* **Reranking dominates everything else**, as expected: `hybrid_rerank` is
+  ~8.5x the cost of the fused arm, with ~3.37 s of its 3.85 s median inside the
+  cross-encoder.
+* **The median earned its place.** `hybrid` carries a 12.0 s outlier — a single
+  rate-limited embedding call — which inflates its stdev to 1373.66 while leaving
+  the median at 455.97. The old mean-based seed would have absorbed that outlier
+  into the price list.
+* **The measured ratios differ substantially from the seed.** Every arm moved:
+  dense −27%, hybrid −37%, `hybrid_rerank` −13%, `bm25` +32%. dense and hybrid
+  are now near-identical in cost, which is the opposite of what the seed claimed
+  and follows directly from the seed's means absorbing network variance into one
+  arm but not the other.
+
+### Two defects found and fixed en route
+
+* **`instantiate_components` ignored an injected Qdrant client** in the adaptive
+  branch and opened a second one. Local Qdrant takes an exclusive lock, so any
+  caller building several arms at once — exactly what this sweep does — failed
+  with `AlreadyLocked`. The gate never hit it because it builds one arm at a
+  time. Two regression tests cover both directions; the reuse test fails without
+  the fix.
+* **The sweep tripped the embedding provider's rate limit** at repetition 5/5 on
+  a first attempt. Three of the four costed strategies embed every query
+  remotely, so the protocol issues a burst of live calls that the adapter's
+  `2 ** attempt` backoff over `max_retries=4` could not ride out. The sweep now
+  paces queries on provider-calling arms, sleeping *between* timed retrievals so
+  it cannot enter any `latency_ms`. The pacing is recorded in the artifact.
+
+## Limitations
+
+* **Latency is hardware-, load-, and provider-dependent.** This table describes
+  one machine against one provider over one afternoon. It is not portable, and
+  the `experiments/phase7/` artifacts are gitignored, so a re-run is the only way
+  to refresh it.
+* **Dense and hybrid are nearly free of retrieval cost relative to their network
+  cost.** Comparing them on this table mostly compares two API round-trips.
+* **The median understates worst case.** `hybrid`'s p95 is 2x its p50 and its
+  worst sample was 12 s; a router optimising against the median will not avoid
+  the tail.
+* **The cost table remains untuned against quality.** `cost_weight=0.25` and
+  `sufficiency_threshold=0.5` are still reasoned defaults; calibrating them is
+  Phase 7 ablation work.
+
+## Definition of Done for 7.0a/7.0b
+
+- [x] Five-arm environment gate, 5/5 deterministic, artifact with provenance
+- [x] Cost table re-measured under a defined, warm-up-and-rotation protocol
+- [x] `n=100` per arm, complete artifact, no rerank fallbacks
+- [x] Medians reviewed and frozen into `RoutingConfig`, `adaptive` excluded
+- [x] Injected-Qdrant-client defect fixed and regression-tested
+- [x] Rate-limit pacing added, recorded in the artifact
+- [ ] Adaptive-vs-fixed comparison (E-series)
+- [ ] Ablation program and threshold calibration
+
 ## Next steps
 
-> Phase 7 — Evaluation & Ablations
+> Phase 7 E-series — adaptive-vs-fixed evaluation and ablations.
 
-Phase 7 owns the adaptive-vs-fixed comparison, the ablation program
-(fixed vs adaptive, query-only vs feedback, no-escalation vs bounded escalation,
-rule-based vs learned, and signal-group ablations), failure-mode analysis, and
-threshold calibration. Phase 6 deliberately implements none of it: the current
-phase is the adaptive mechanism itself — correct, testable, observable, and
-runnable.
+The foundation is measured and frozen. The evaluation and ablation program,
+failure-mode analysis, and threshold calibration remain unstarted.

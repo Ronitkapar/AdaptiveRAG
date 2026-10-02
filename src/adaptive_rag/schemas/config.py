@@ -274,11 +274,26 @@ class RoutingConfig(BaseModel):
     )
 
     # Empirically measured retrieval latency per strategy, in milliseconds.
+    #
+    # Re-measured in Phase 7 under the protocol in `evaluation/measurement.py`:
+    # medians over 5 repetitions x 20 queries (n=100 per arm), 5 warm-up queries
+    # discarded, arm order and query order rotated between repetitions. Provenance
+    # is recorded in `experiments/phase7/strategy_cost_ms.json`.
+    #
+    # These replaced a Phase 5 seed taken from single-pass per-query means with no
+    # warm-up, which encoded a dense/hybrid gap narrower than this hardware's
+    # own run-to-run spread.
+    #
+    # Read `stage_median_ms` in that artifact before trusting these as pure
+    # retrieval cost: for dense, ~426 ms of the ~452 ms median is the live
+    # `text-embedding-3-large` call and only ~24 ms is the vector search. The
+    # router consumes the ratios between these numbers, so a provider outage or
+    # a faster provider changes the table's meaning.
     strategy_cost_ms: dict[str, float] = Field(default_factory=lambda: {
-        "bm25": 1.71,
-        "dense": 621.35,
-        "hybrid": 721.00,
-        "hybrid_rerank": 4447.68,
+        "bm25": 2.25,
+        "dense": 451.78,
+        "hybrid": 455.97,
+        "hybrid_rerank": 3854.41,
     })
 
     # Quality-vs-cost trade-off knob. 0.0 is pure evidence; higher values subtract

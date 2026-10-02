@@ -60,10 +60,11 @@ Current progression:
 * Phase 3 — BM25: COMPLETE
 * Phase 4 — Hybrid: COMPLETE
 * Phase 5 — Reranking: COMPLETE
-* Phase 6 — Adaptive Routing: NEXT / IN PROGRESS
-* Phase 7 — Evaluation & Ablations: FUTURE
+* Phase 6 — Adaptive Routing: COMPLETE
+* Phase 7 — Evaluation & Ablations: IN PROGRESS (7.0a gate, 7.0b cost freeze complete)
 
-Do not implement Phase 7+ functionality unless explicitly requested.
+Do not implement the Phase 7 ablation program or threshold calibration unless
+explicitly requested.
 
 ---
 

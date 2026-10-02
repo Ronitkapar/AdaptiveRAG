@@ -169,3 +169,31 @@ routing_latency_ms_mean     analysis + routing overhead
 escalated_retrieval_latency_ms_mean / non_escalated_retrieval_latency_ms_mean
 initial_strategy_distribution / final_strategy_distribution
 ```
+
+## Phase 7 foundation scripts
+
+Two scripts write into `experiments/phase7/`. Both are measurement tools: they
+report, and neither writes back into configuration.
+
+```bash
+# 7.0a environment gate -- must pass 5/5 before any measurement is trusted
+.venv/bin/python scripts/validate_environment.py
+
+# 7.0b strategy-cost sweep -- re-measures RoutingConfig.strategy_cost_ms
+.venv/bin/python scripts/measure_strategy_cost.py \
+    --arms bm25,dense,hybrid,hybrid_rerank,adaptive
+```
+
+The sweep runs 5 repetitions of all 20 evaluation queries per arm (n=100), after
+discarded warm-ups, with arm order and query order rotated between repetitions.
+It takes roughly 17 minutes and needs `AICREDITS_API_KEY`, because three of the
+four costed strategies embed every query remotely.
+
+`--pace` (default 0.75 s) sleeps between queries on provider-calling arms. It
+exists because the burst trips the embedding API rate limit part-way through; the
+sleep sits between timed retrievals so it cannot affect any `latency_ms`. Use
+`--pace 0` to disable it.
+
+Output lands in `experiments/phase7/`, which is gitignored like every other run
+directory. Provenance — commit, corpus version, dataset hash, package versions,
+and the pacing value — travels inside each artifact.
