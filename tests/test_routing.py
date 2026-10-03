@@ -792,6 +792,159 @@ def test_adaptive_trace_round_trips_through_json():
     assert RetrievalMetadata.model_validate(payload).routing is not None
 
 
+# --- 7b: Phase 7 pre-escalation capture (experiment E8) ---------------------
+
+
+def _two_stage_split_documents():
+    """Escalating pair whose first stage returns several chunks of one document.
+
+    Distinct `chunk_id`s that share `document_id`s are the point: document-level
+    recall collapses them while precision does not, so both orders must survive
+    the capture separately.
+    """
+    bm25 = StubRetriever(
+        "bm25",
+        _ranked(["alpha::1", "alpha::2", "beta::1", "gamma::1"], text=UNGROUNDED),
+        latency_ms=1.7,
+    )
+    dense = StubRetriever(
+        "dense", _ranked(["delta::1", "delta::2"], text=GROUNDED), latency_ms=600.0
+    )
+    return {"bm25": bm25, "dense": dense}, bm25, dense
+
+
+def test_routing_trace_validates_with_the_pre_escalation_capture():
+    """A trace carrying the capture must round-trip through JSON unchanged."""
+    from adaptive_rag.schemas import RoutingTrace
+
+    retrievers, _, _ = _two_stage_split_documents()
+    trace = _adaptive(retrievers).retrieve("reciprocal rank fusion", top_k=4)
+    routing = trace.retrieval_metadata.routing
+
+    payload = routing.model_dump(mode="json")
+    assert payload["initial_chunk_ids"] == ["alpha::1", "alpha::2", "beta::1", "gamma::1"]
+    assert payload["initial_document_ids"] == ["alpha", "alpha", "beta", "gamma"]
+    assert RoutingTrace.model_validate(payload) == routing
+
+
+def test_routing_trace_validates_without_the_pre_escalation_capture():
+    """A pre-Phase-7 trace payload must still validate under extra="forbid".
+
+    Emulated by stripping the two keys from an *escalated* trace, which is the
+    hardest backwards-compatibility case: the fields exist and are absent only
+    because the artifact predates them.
+    """
+    from adaptive_rag.schemas import RoutingTrace
+
+    retrievers, _, _ = _two_stage_split_documents()
+    routing = (
+        _adaptive(retrievers)
+        .retrieve("reciprocal rank fusion", top_k=4)
+        .retrieval_metadata.routing
+    )
+    payload = routing.model_dump(mode="json")
+    del payload["initial_chunk_ids"]
+    del payload["initial_document_ids"]
+
+    trace = RoutingTrace.model_validate(payload)
+    assert trace.initial_chunk_ids is None
+    assert trace.initial_document_ids is None
+    # Everything else about the escalated trace is untouched by their absence.
+    assert trace.escalation.escalated is True
+    assert trace.initial_result_count == 4
+
+
+def test_adaptive_captures_the_discarded_pre_escalation_results():
+    """E8 measures quality *before* a transition, so the first stage must survive."""
+    retrievers, bm25, _ = _two_stage_split_documents()
+    trace = _adaptive(retrievers).retrieve("reciprocal rank fusion", top_k=4)
+    routing = trace.retrieval_metadata.routing
+
+    assert routing.escalation.escalated is True
+    assert routing.initial_chunk_ids == [r.chunk_id for r in bm25.results]
+    assert routing.initial_document_ids == [
+        r.metadata.document_id for r in bm25.results
+    ]
+    # Rank order is the contract, and the count already claimed must agree.
+    assert routing.initial_result_count == len(routing.initial_chunk_ids)
+    assert routing.final_strategy == "dense"
+    assert [r.chunk_id for r in trace.results] == ["delta::1", "delta::2"]
+
+
+def test_adaptive_leaves_the_capture_absent_when_it_does_not_escalate():
+    """Documented choice: the capture is conditional, not universal.
+
+    A settled query returned its initial results unchanged, so there is no
+    discarded evidence to record and the fields stay None.
+    """
+    retrievers, bm25, dense = _two_stage(GROUNDED)
+    trace = _adaptive(retrievers).retrieve("reciprocal rank fusion", top_k=4)
+    routing = trace.retrieval_metadata.routing
+
+    assert routing.escalation.escalated is False
+    assert routing.initial_chunk_ids is None
+    assert routing.initial_document_ids is None
+    # Quality "before" is not lost for a settled query: it is the final result set.
+    assert [r.chunk_id for r in trace.results] == [r.chunk_id for r in bm25.results]
+    assert dense.call_count == 0
+
+
+def test_adaptive_capture_distinguishes_absent_from_an_empty_first_stage():
+    """None means "did not escalate"; [] means "escalated from nothing"."""
+    from adaptive_rag.schemas import RoutingTrace
+
+    empty_first = StubRetriever("bm25", [], latency_ms=1.7)
+    retrievers = {
+        "bm25": empty_first,
+        "dense": StubRetriever("dense", _ranked(["delta::1"], text=GROUNDED), latency_ms=600.0),
+    }
+    routing = (
+        _adaptive(retrievers)
+        .retrieve("reciprocal rank fusion", top_k=4)
+        .retrieval_metadata.routing
+    )
+
+    assert routing.escalation.escalated is True
+    assert routing.initial_chunk_ids == []
+    assert routing.initial_document_ids == []
+    assert RoutingTrace.model_validate(routing.model_dump(mode="json")) == routing
+
+
+@pytest.mark.parametrize(
+    "run_name",
+    ["20260929T175539Z-hybrid_baseline_v1", "20261001T175737Z-adaptive_bm25_v1"],
+)
+def test_persisted_pre_escalation_artifacts_still_validate(run_name: str):
+    """Real on-disk runs written before the capture existed must still parse.
+
+    The adaptive artifact is the interesting one: it carries 20 routed traces
+    whose payloads predate the two fields, so it is a real backwards-compatibility
+    exercise rather than a synthetic one.
+    """
+    from adaptive_rag.config.paths import EXPERIMENTS_DIR
+    from adaptive_rag.schemas import ExperimentTrace
+
+    traces_path = EXPERIMENTS_DIR / run_name / "traces.jsonl"
+    if not traces_path.is_file():
+        pytest.skip(f"{run_name} not present on this machine")
+
+    count = 0
+    routed = 0
+    with open(traces_path, "r", encoding="utf-8") as f:
+        for line in f:
+            if not line.strip():
+                continue
+            trace = ExperimentTrace.model_validate_json(line)
+            if trace.routing is not None:
+                routed += 1
+                assert trace.routing.initial_chunk_ids is None
+                assert trace.routing.initial_document_ids is None
+            count += 1
+
+    assert count > 0
+    assert (routed > 0) == run_name.startswith("20261001")
+
+
 def test_routing_evaluator_is_silent_without_routing():
     """A fixed-strategy run must emit no routing metrics at all."""
     from adaptive_rag.schemas import ExperimentTrace, ReferenceInfo
@@ -885,6 +1038,40 @@ def test_adaptive_runs_end_to_end_through_the_runner(tmp_path):
     assert trace["retrieval"]["retrieval_method"] == "adaptive"
     routing_metrics = json.loads((run_dir / "metrics_routing.json").read_text())
     assert routing_metrics["aggregates"]["routed_traces"] == 1
+
+
+def test_adaptive_capture_reaches_the_persisted_trace(tmp_path):
+    """E8 reads quality-before off disk, so the capture must survive the runner."""
+    from adaptive_rag.schemas import EvaluationExample
+
+    retrievers, _, _ = _two_stage(UNGROUNDED)
+    config = build_experiment_config(
+        name="adaptive_v1", corpus_version="corpus_test",
+        retrieval=RetrievalConfig(retrieval_method="adaptive"),
+        routing=RoutingConfig(
+            available_strategies=["bm25", "dense"], escalation_ladder=["bm25", "dense"]
+        ),
+    )
+    dataset = [
+        EvaluationExample(
+            example_id="e1", query="reciprocal rank fusion",
+            reference_answer="a", relevant_documents=["b0"], category="factual",
+        )
+    ]
+    summary = ExperimentRunner(
+        retriever=_adaptive(retrievers, routing=config.routing),
+        generator=None,
+        evaluators=[RoutingEvaluator()],
+        output_root=tmp_path,
+    ).run(config, dataset)
+
+    trace = json.loads(
+        (tmp_path / summary["experiment_id"] / "traces.jsonl")
+        .read_text().strip().splitlines()[0]
+    )
+    assert trace["routing"]["escalation"]["escalated"] is True
+    assert trace["routing"]["initial_chunk_ids"] == ["b0", "b1", "b2", "b3"]
+    assert trace["routing"]["initial_document_ids"] == ["b0", "b1", "b2", "b3"]
 
 
 def test_adaptive_failure_becomes_retrieval_failed_in_the_runner(tmp_path):

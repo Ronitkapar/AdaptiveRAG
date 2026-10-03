@@ -55,6 +55,14 @@ experiments/*/
 !experiments/.gitkeep
 !experiments/README.md
 
+# Stray SQLite session artifacts from an in-memory database literal path (Phase 7)
+:memory:.ses
+
+# Superseded phase 7 dataset build intermediates; the frozen dataset is
+# data/evaluation/phase7_eval_v1.jsonl and its ledger (Phase 7)
+data/evaluation/phase7_part_*.jsonl
+data/evaluation/phase7_part_*.ledger.jsonl
+
 # IDEs & OS
 .vscode/
 .idea/

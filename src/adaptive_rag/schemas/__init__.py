@@ -34,6 +34,7 @@ from adaptive_rag.schemas.document import (
     Section,
 )
 from adaptive_rag.schemas.experiment import (
+    EVAL_SPLITS,
     ErrorInfo,
     EvaluationExample,
     EvaluationReport,
@@ -75,6 +76,7 @@ __all__ = [
     "ErrorInfo",
     "EscalationDecision",
     "EvaluationConfig",
+    "EVAL_SPLITS",
     "EvaluationExample",
     "EvaluationReport",
     "ExperimentConfig",

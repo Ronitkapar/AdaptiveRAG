@@ -654,3 +654,83 @@ stemming, part-of-speech tagging, or parsing. It counts surface cues with frozen
 version-stamped lexicons, keeping analysis cheap, deterministic, and
 interpretable. Learned-router training and routing-dataset generation belong to
 Phase 7.
+
+## ADR-027 — The Benchmark Carries an Explicit Calibration/Test Split
+
+Status: ACCEPTED
+
+`EvaluationExample.split` is a `Literal["calibration", "test"]` that defaults to
+`"calibration"`. Phase 7 must calibrate the Phase 6 routing defaults
+(`cost_weight`, `sufficiency_threshold`) against labels and then report final
+numbers on data those thresholds never saw. That separation has to live in the
+data contract, not in a runner's arguments, or "the test set was left untouched"
+cannot be checked after the fact. `evaluate.dataset.partition_by_split` reads the
+field and nothing else, and `validate_split_separation` raises `EvaluationError` on
+a duplicate `example_id` within a split or the same `example_id` in both.
+
+The default is `calibration`, **not** `test`. `dense_eval_v1` is not a virgin
+holdout: it was the only evaluation set behind every Phase 2–6 comparison, and the
+Phase 6 defaults were reasoned while looking at it. Calling that data `test` would
+advertise an untouched final test set that does not exist, and would license
+calibrating a threshold and then scoring it on the same twenty examples — the
+leakage the split exists to prevent. The cost is deliberate: a dataset of legacy
+records alone yields an **empty** test split, so final-test reporting fails loudly
+instead of silently reusing calibration queries. A genuine holdout is labelled
+`split: "test"` by hand as new records are curated.
+
+The default also exists for mechanical backwards compatibility: the twenty
+committed records carry no `split` key, and the model is `extra="forbid"`.
+
+---
+
+## ADR-028 — Phase 7 Findings: The Rerank Rung Is Net-Negative and the Shipped Gate Cannot Open
+
+Status: RECOMMENDED — NOT IMPLEMENTED
+
+Phase 7 measured the shipped routing configuration end to end and produced two
+architectural findings. This ADR records them as **recommendations**. Neither has
+been acted on: changing `RoutingConfig.escalation_ladder` or
+`RoutingConfig.sufficiency_threshold` modifies the Phase 6 router and its shipped
+defaults, which is a Phase 6 change and therefore out of Phase 7 scope. The
+current code is unchanged and continues to behave exactly as Phase 6 shipped.
+
+**Finding 1 — the cross-encoder reranker is net-negative on this corpus and must
+not be the terminal escalation rung.** In E1 over 107 paired queries,
+`hybrid_rerank` is last on every quality metric (Recall@5 0.7165, MRR 0.5851,
+Hit@5 0.7757) against hybrid's 0.8723 / 0.8576 / 0.9346, at 7.5x hybrid's median
+latency (3491.69 ms vs 465.65 ms). Against bm25 it is significantly **worse** on
+MRR (adjusted p 0.00037) and nDCG@5 (adjusted p 0.000117) — significant
+differences in the wrong direction. Seven classic reranker defects were ruled out
+before accepting this, including an exact replay of the project's own ONNX
+scoring path that reproduced all 1070 stored logits at max |Δ| = 0.0000. The
+recommendation is to remove `hybrid_rerank` from the router's strategy set so the
+ladder terminates on a quality-positive rung.
+
+This is not a reversal of ADR-020. That ADR records reranking as a correct
+*architectural* second stage; this one records that the specific model chosen
+does not pay for itself on this corpus. The defect is the model's domain
+mismatch with column-interleaved PDF-extraction prose, not the composition-layer
+design, and ADR-020's stage boundary stands.
+
+**Finding 2 — the shipped sufficiency threshold sits above the observed score
+range, so escalation cannot fire.** `sufficiency_threshold=0.5` was a reasoned
+default (ADR-024), never a tuned value. Across all 107 routed rows, observed
+sufficiency never falls below **0.6364** (60 test records) or **0.65** (47
+calibration records), so the gate cannot open: `n_escalated = 0`,
+`n_transitions_observed = 0`, mean stage count 1.00. Escalation *was* observed —
+3 queries, all in the `sufficiency_threshold=0.7` calibration arm (6.4%) — so the
+defect is that the shipped bar is mis-set, not that escalation is unreachable in
+principle.
+
+The recommendation is to recalibrate the threshold inside the observed range
+(0.6–0.65), and to validate it on a **joint grid with `cost_weight`** rather than
+the independent one-axis-at-a-time sweeps Phase 7 ran. The joint optimum is
+unmeasured, so this phase's evidence does not by itself justify changing the
+default to any particular value.
+
+**Consequence for the phase-7 result.** Because the gate never fires, `adaptive`
+collapses onto hybrid — identical Recall@5 and Hit@5 on 107/107, identical
+retrieved chunk-ids on 104/107 — and pays ~59 ms of median latency for that
+equivalence. "Adaptive routing does not beat a fixed strategy" is therefore an
+artifact of a gate that never opens, not evidence that routing cannot help. Any
+re-evaluation must follow both recommendations, not either one alone.

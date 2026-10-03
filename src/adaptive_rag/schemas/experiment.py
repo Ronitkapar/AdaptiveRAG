@@ -23,6 +23,12 @@ from adaptive_rag.schemas.retrieval import RetrievalResponse
 from adaptive_rag.schemas.routing import RoutingTrace
 
 
+# The two disjoint partitions of a benchmark. Phase 7 calibrates routing
+# thresholds (cost_weight, sufficiency_threshold) against labels on "calibration"
+# and reports untouched final numbers on "test"; no example_id may appear in both.
+EVAL_SPLITS: tuple[str, ...] = ("calibration", "test")
+
+
 class SectionRef(BaseModel):
     """Reference to a relevant document section."""
 
@@ -54,6 +60,19 @@ class EvaluationExample(BaseModel):
     requires_multi_hop: bool = False
     notes: str = ""
     dataset_version: str = "dense_eval_v1"
+    # Splits default to "calibration", not "test", so that records predating the
+    # split concept are treated as calibration material. dense_eval_v1 is not a
+    # virgin holdout: it was the sole evaluation set behind every Phase 2-6
+    # comparison, and the Phase 6 routing defaults were chosen while looking at
+    # it. Labelling that already-observed data "test" would advertise an untouched
+    # final test set that does not exist, and Phase 7 would then calibrate
+    # cost_weight/sufficiency_threshold and score them on the same 20 examples --
+    # exactly the leakage this split exists to prevent. The cost of this default
+    # is deliberate: a dataset of only legacy records yields an empty test split,
+    # so final-test reporting must fail loudly rather than silently reuse
+    # calibration queries. A genuinely held-out split has to be labelled
+    # `split: "test"` explicitly, by hand, as new records are curated.
+    split: Literal["calibration", "test"] = "calibration"
 
 
 class ErrorInfo(BaseModel):

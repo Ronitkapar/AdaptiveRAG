@@ -713,6 +713,19 @@ sufficiency decision with every signal, the escalation decision with its reason,
 the final strategy, the per-stage latencies, and the routing overhead. It
 defaults to `None`, so all traces recorded before Phase 6 still validate.
 
+`RoutingTrace.initial_chunk_ids` and `initial_document_ids` additionally retain
+the first stage's ranked results — the evidence an escalation discarded — so that
+quality before and after a transition can be measured from the trace alone. Both
+default to `None` and are populated *only* when the query actually escalated: a
+query that settled kept its initial results, so its "before" is already
+`retrieval.results` and recording it again would be pure duplication. `None`
+therefore means "not recorded because nothing was discarded", and is distinct
+from `[]`, meaning "recorded, and the first stage returned nothing". Scores are
+not retained: quality metrics read ranked chunk and document identifiers only, and
+BM25, cosine, and cross-encoder scores are not comparable across stages. Both
+fields being optional is what keeps the traces already written under
+`experiments/*/traces.jsonl` valid.
+
 Aggregate metrics should be traceable back to raw results.
 
 ---

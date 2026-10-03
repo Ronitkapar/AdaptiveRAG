@@ -194,7 +194,12 @@ def _shared_qdrant_client() -> Any:
         return QdrantClient(path=str(path))
     except Exception as exc:  # noqa: BLE001 -- normalized to the store's error
         raise IndexUnavailableError(
-            f"Failed to initialize shared Qdrant client: {exc}"
+            f"Failed to initialize shared Qdrant client: {exc} "
+            f"Storage path: {settings.QDRANT_PATH}. In local mode the commonest "
+            f"cause is another process on this machine still holding the lock on "
+            f"that folder (a previous run, a REPL, or a stray script) -- stop it "
+            f"and retry; only switch to Qdrant server mode if a shared daemon is "
+            f"actually what you want."
         ) from exc
 
 

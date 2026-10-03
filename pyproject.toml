@@ -23,6 +23,9 @@ dev = [
     "pytest>=8.0.0",
     "reportlab>=4.0.0",
 ]
+plots = [
+    "matplotlib>=3.8.0",
+]
 
 [build-system]
 requires = ["hatchling"]
@@ -40,4 +43,3 @@ markers = [
     "integration: tests requiring live API keys or prebuilt artifacts (deselected by default)",
 ]
 addopts = "-m 'not integration'"
-

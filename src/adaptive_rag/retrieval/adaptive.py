@@ -118,7 +118,20 @@ class AdaptiveRetriever:
         final_strategy = initial_strategy
         escalation = self._decide_escalation(sufficiency, initial_strategy)
 
+        # Pre-escalation evidence for Phase 7 E8, which must score quality
+        # *before* and *after* each escalation transition. Left None unless the
+        # query actually escalated: a query that settled kept `initial` as its
+        # final results, so the discarded-before list would just restate what the
+        # trace already carries. Recorded here, where the first stage's response
+        # is still in hand and is about to be superseded. Rank-ordered ids are all
+        # E8 needs; scores are omitted because BM25, cosine, and cross-encoder
+        # scores are not comparable across stages.
+        initial_chunk_ids: list[str] | None = None
+        initial_document_ids: list[str] | None = None
+
         if escalation.escalated and escalation.to_strategy is not None:
+            initial_chunk_ids = [r.chunk_id for r in initial.results]
+            initial_document_ids = [r.metadata.document_id for r in initial.results]
             final = self.retrievers[escalation.to_strategy].retrieve(
                 query, top_k=k, filters=filt
             )
@@ -132,6 +145,8 @@ class AdaptiveRetriever:
             initial_strategy=initial_strategy,
             initial_latency_ms=stage_latencies[0],
             initial_result_count=len(initial.results),
+            initial_chunk_ids=initial_chunk_ids,
+            initial_document_ids=initial_document_ids,
             sufficiency=sufficiency,
             escalation=escalation,
             final_strategy=final_strategy,

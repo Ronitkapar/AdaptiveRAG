@@ -49,8 +49,49 @@ def _timestamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
+def _set_total_latency(trace: ExperimentTrace) -> None:
+    """Record the wall-clock cost of the work this trace actually performed.
+
+    Definition: `total_latency_ms` is the sum of the **top-level stages that ran**
+    -- `retrieval_latency_ms`, plus `generation_latency_ms` when a generation
+    stage ran. Nothing else is added, because nothing else is disjoint:
+
+    * `retrieval_latency_ms` is already the *end-to-end* clock of the retrieval
+      stage and is inclusive of that stage's own internal work. `reranked.py`
+      records `candidate_generation_latency_ms + rerank_latency_ms`, and
+      `adaptive.py` records `routing_latency_ms + sum(stage_latencies_ms)`. So the
+      flat sub-stage fields (`candidate_generation_latency_ms`,
+      `rerank_latency_ms`, `routing.stage_latencies_ms`,
+      `routing.routing_latency_ms`) are *components* of `retrieval_latency_ms`,
+      not siblings of it; adding them again would report a total larger than the
+      run ever took and would inflate every reranked and escalated query.
+    * Consequently the invariant this preserves is that `total_latency_ms` is never
+      smaller than any single stage it contains -- including each individual
+      escalation stage, and including the rerank stage on its own -- while never
+      double-counting one.
+
+    On a retrieval-only run there is no generation stage, so `total_latency_ms`
+    equals `retrieval_latency_ms`: the retrieval work that was performed, and
+    nothing invented to fill the field.
+    """
+    parts = [
+        value
+        for value in (trace.retrieval_latency_ms, trace.generation_latency_ms)
+        if value is not None
+    ]
+    if not parts:
+        return
+    trace.total_latency_ms = float(sum(parts))
+
+
 class ExperimentRunner:
-    """Runs a retrieval/generation system over a benchmark and records traces."""
+    """Runs a retrieval/generation system over a benchmark and records traces.
+
+    `retrieval_only=True` selects the Phase 7 protocol: retrieval (plus context
+    construction, which is local and deterministic) is measured, and the generation
+    stage is skipped. It is a distinct switch from `generator=None`; see the note
+    in `__init__` and `_set_total_latency` for why both exist.
+    """
 
     def __init__(
         self,
@@ -59,12 +100,21 @@ class ExperimentRunner:
         context_builder: ContextBuilder | None = None,
         evaluators: Sequence[Any] | None = None,
         output_root: Path = EXPERIMENTS_DIR,
+        retrieval_only: bool = False,
     ):
         self.retriever = retriever
         self.generator = generator
         self.context_builder = context_builder or ContextBuilder()
         self.evaluators = list(evaluators or [])
         self.output_root = output_root
+        # Retrieval-only is a *protocol*, not a missing generator. `generator=None`
+        # still means "this runner has no generator" and yields `status="empty"`;
+        # `retrieval_only=True` means Phase 7 is measuring retrieval, so the
+        # generation stage is skipped entirely and a successful retrieval is
+        # reported as `status="ok"` with no answer and no generation clock. Keeping
+        # them distinct is what stops "pass no generator" from silently meaning
+        # "run retrieval-only" (or the reverse) on an existing call path.
+        self.retrieval_only = bool(retrieval_only)
 
     def run(
         self,
@@ -199,6 +249,16 @@ class ExperimentRunner:
             )
             return trace
 
+        if self.retrieval_only:
+            # Retrieval-only protocol: the query succeeded exactly as far as the
+            # measurement goes. No generator is consulted, so there is no answer,
+            # no `generation`, no generation latency and no cost -- those fields stay
+            # absent, which is the honest record of a stage that never ran, not a
+            # missing clock.
+            trace.status = "ok"
+            _set_total_latency(trace)
+            return trace
+
         if self.generator is None:
             trace.status = "empty"
             return trace
@@ -224,8 +284,7 @@ class ExperimentRunner:
             )
             return trace
 
-        if trace.retrieval_latency_ms is not None and trace.generation_latency_ms is not None:
-            trace.total_latency_ms = trace.retrieval_latency_ms + trace.generation_latency_ms
+        _set_total_latency(trace)
         return trace
 
 

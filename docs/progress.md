@@ -37,7 +37,7 @@ Evaluation will consider:
 | Phase 4 — Hybrid                   | COMPLETE                                    |
 | Phase 5 — Reranking                | COMPLETE                                    |
 | Phase 6 — Adaptive Routing         | IMPLEMENTATION COMPLETE / OFFLINE VALIDATED |
-| Phase 7 — Evaluation & Ablations   | IN PROGRESS (7.0a gate, 7.0b cost freeze complete) |
+| Phase 7 — Evaluation & Ablations   | E-SERIES EXECUTED / DoD PARTIAL           |
 
 ---
 
@@ -651,11 +651,14 @@ unchanged. Orchestrates the four collaborators; owns no ranking logic and holds
 
 # Phase 7 — Evaluation & Ablations
 
-Status: IN PROGRESS — 7.0a environment gate and 7.0b strategy-cost freeze complete
+Status: E-SERIES EXECUTED / DEFINITION OF DONE PARTIAL
 
 Phase 7 evaluates whether adaptive routing actually earns its complexity. This
-entry covers the foundation work completed so far; the evaluation and ablation
-program itself has not started.
+entry records the foundation (7.0a–7.0c) followed by the executed E-series
+(E1–E8). The results report is [`docs/phase_7_results.md`](phase_7_results.md);
+the phase record is [`docs/phases/phase-7.md`](phases/phase-7.md). The
+Definition of Done is **not** fully met — see the honest accounting at the end of
+this entry.
 
 ## 7.0a Environment gate — COMPLETE
 
@@ -770,7 +773,56 @@ without a re-run.
   `sufficiency_threshold=0.5` are still reasoned defaults; calibrating them is
   Phase 7 ablation work.
 
-## Definition of Done for 7.0a/7.0b
+## 7.0c Suite execution & reporting infrastructure — COMPLETE
+
+Infrastructure for the E-series. **No experiment has been run and no result is
+claimed here**; this is the machinery the studies will execute on.
+
+Four new modules, one per deliverable:
+
+* `experiments/registry.py` — an append-only registry keyed by
+  `(experiment_id, variant)`. Provenance is read back out of each run's own
+  `manifest.json` and `config.json` rather than being re-entered, so an entry
+  cannot disagree with the run it describes. Re-registering a pair raises; a
+  *different* variant under the same study is the normal way E3 accumulates one
+  arm per disabled feature group. `extra="forbid"` throughout.
+* `evaluation/rows.py` — one flat row per (query, system): recall/precision/hit
+  at k in {1, 5, 10}, MRR, nDCG@5, the latency decomposition, the routing
+  decision, the pre-escalation evidence E8 needs, and the cost fields, exported
+  to CSV and JSONL with a frozen column order. **Every metric value comes from
+  calling `RetrievalEvaluator`'s own helpers** — no recall/precision/MRR
+  arithmetic is reimplemented, so a row cannot disagree with the mean published
+  in the same run's `metrics.json`. Failed retrievals are rows with a `status`,
+  not dropped queries.
+* `evaluation/suite.py` — the driver. Plans the arms a study implies, verifies
+  the shared conditions *before* anything runs, executes each through
+  `ExperimentRunner`, exports rows, and registers the result.
+* `scripts/run_phase7_suite.py` — the CLI (`--dataset`, `--split`, `--experiments`,
+  `--arms`, `--out`, `--pace`, `--strict`, `--resume`, `--no-registration`).
+
+Three properties the driver is built around:
+
+* **One Qdrant client for the whole suite.** Local mode takes an exclusive lock on
+  the storage folder, and building several arms at once is exactly what a suite
+  does. The suite opens one client and passes the same handle to every arm, and
+  additionally *caches component trees by config identity*: E1's `adaptive` arm
+  and E2's shipped-config variant are the same system and open the index once.
+  A regression test pins both the shared handle and the sharing.
+* **Pacing outside the clock.** `PacedRetriever` sleeps *before* delegating on
+  provider-calling arms (`dense`, `hybrid`, `hybrid_rerank`, `adaptive`), so the
+  sleep cannot enter any `latency_ms`; the default matches
+  `measure_strategy_cost.py`. The value is recorded in `suite.json` and on each
+  registry entry. A test asserts the trace latency is bit-identical to the
+  fake's with pacing on.
+* **A failing arm is reported, not dropped.** It becomes a failure record in
+  `suite.json` and in the returned result, and is never registered. `--strict`
+  aborts on the first failure *after* persisting the work that did run.
+
+E6, E7 and E8 have no arm of their own: they are analyses over the runs E1-E3
+produce. Requesting one is answered with that explanation rather than an
+invented run.
+
+## Definition of Done for 7.0a/7.0b/7.0c
 
 - [x] Five-arm environment gate, 5/5 deterministic, artifact with provenance
 - [x] Cost table re-measured under a defined, warm-up-and-rotation protocol
@@ -778,12 +830,163 @@ without a re-run.
 - [x] Medians reviewed and frozen into `RoutingConfig`, `adaptive` excluded
 - [x] Injected-Qdrant-client defect fixed and regression-tested
 - [x] Rate-limit pacing added, recorded in the artifact
-- [ ] Adaptive-vs-fixed comparison (E-series)
-- [ ] Ablation program and threshold calibration
+- [x] Suite driver, registry, row export, and CLI in place and tested offline
+- [x] Adaptive-vs-fixed comparison (E-series) — *executed; see 7.1-7.3 below*
+- [x] Ablation program and threshold calibration — *executed; see 7.1-7.3 below*
+
+## 7.1-7.3 E-series — EXECUTED
+
+All eight studies ran against the frozen 107-record `phase7_eval_v1` benchmark
+(47 calibration / 60 test, sha256 prefix `f0695189903c8ef8`, sanity gates S1-S5
+and dataset gates G1-G7 pass, `gate_open=true`, `grounding_verified=true`, 0
+empty and 0 contaminated evidence quotes across 293 extractions). Every run was
+retrieval-only. Artifacts, tables, figures, and traces live under
+`experiments/phase7/`, which is gitignored, so provenance travels inside the
+artifact rather than in the repository.
+
+### What was measured
+
+* **E1 — five-arm comparison, 107 paired queries.** Recall@5 / MRR / median
+  latency (ms): bm25 `0.7788 / 0.7264 / 1.88`; dense
+  `0.9283 / 0.8604 / 472.84`; hybrid `0.8723 / 0.8576 / 465.65`;
+  hybrid_rerank `0.7165 / 0.5851 / 3491.69`; adaptive `0.8723 / 0.8564 /
+  524.85`. Against bm25 with Holm step-down per metric, **15 of the 16 evaluable
+  comparisons are significant**; the single non-significant result is
+  `recall_at_5` for `hybrid_rerank` (adj 0.1267). The other four requested
+  comparisons (`estimated_cost_usd`) have `n_pairs = 0` because no run was
+  generation-bearing.
+* **E2 — escalation ablation A/B/C, 47 calibration.** Quality is tied end to
+  end (p_adj 1.0 on recall_at_5 / MRR / nDCG@5). The one significant result is
+  B-vs-C latency: **+58.91 ms median, p = 0.00309, p_adj 0.00618**. Escalation
+  bought latency, not quality.
+* **E3 — leave-one-out over the six feature groups, 47 calibration.**
+  **0 of 24 evaluable comparisons significant.** Recall@5 dips only for
+  `without_complexity` and `without_question_type` (0.8617 vs 0.8830), and
+  neither survives Holm adjustment.
+* **E4 — sufficiency-threshold sweep, 47 calibration.** `0.3 / 0.4 / 0.5 / 0.6`
+  are identical (Recall@5 0.8830, MRR 0.8547, 0.0% escalation — the gate never
+  fires). `0.7` escalates **6.4%** (3 of 47), MRR 0.8377, median 556.71 ms.
+* **E5 — cost-weight sweep, 47 calibration.** `0.0 / 0.25` give Recall@5 0.8830;
+  `0.5 / 0.75 / 1.0` give 0.8617 and nDCG@5 0.6486 -> 0.6330. Escalation is
+  0.0% at every weight, and the router still commits to hybrid's embedding call
+  on ≥94% of queries, so raising the weight costs quality with no median-latency
+  benefit.
+* **E6 — routing decision overhead, n=107.** `routing_latency_ms` mean 0.85 ms,
+  median 0.81 ms — 0.71% of total latency per query by mean, 0.16% by median.
+  `reranking_latency_ms`, `candidate_generation`, `generation`, and
+  `query_embedding` each have **n = 0**, because the escalation path never ran.
+* **E7 — per-category breakdown, adaptive, n=107 pooled.** Recall@5 by category:
+  terminology 0.9500, conceptual 0.9310, factual 0.9231, fine_grained 0.8824,
+  comparative 0.6250, multi_document 0.4762. Escalation is 0.0% in every
+  category.
+* **E8 — escalation analysis.** `n_escalated = 0` and
+  `n_transitions_observed = 0` across all 107 routed rows. Observed sufficiency
+  never falls below **0.6364** (test) / **0.65** (calibration), so the shipped
+  0.5 bar cannot open. Escalation *was* observed — 3 times, all in the 0.7
+  calibration arm — so the correct claim is that the shipped gate is too tight
+  on this dataset, not that escalation never happens.
+
+### Headline negative result
+
+**At the shipped Phase 6 defaults adaptive routing earns nothing.** The
+sufficiency gate never fires, so `adaptive` collapses onto hybrid: Recall@5 and
+Hit@5 are identical on 107/107, retrieved chunk-ids are identical on 104/107,
+and MRR differs on exactly one query. That equivalence costs ~59 ms of median
+latency, of which only 0.81 ms is the routing decision itself — the rest is the
+hybrid stage the router selects. No composite quality/cost score is computed
+anywhere, and none may be derived: the result is a trade-off to be reasoned
+about, not an ordering.
+
+Two findings sit underneath that:
+
+* **The cross-encoder reranker is net-negative on this corpus.** It is last on
+  every E1 quality metric and 7.5x hybrid's median latency, and it is
+  significantly *worse* than bm25 on MRR (adj 0.00037) and nDCG@5 (adj
+  0.000117) — a significant difference in the wrong direction. It is also the
+  terminal rung of the escalation ladder, so the gate can only ever escalate
+  *into* it. Full defect-isolation evidence, including an exact replay of the
+  stored logits, is in `docs/phase_7_results.md` §11.
+* **The sufficiency threshold sits above the observed score range**, so the
+  escalation path is unreachable as configured.
+
+Both are recorded as recommendations in ADR-028. **Neither has been acted on.**
+Changing the escalation ladder or the threshold is a Phase 6 change and is out
+of Phase 7 scope.
+
+### Figures
+
+Four figures rendered: `e1_quality_vs_latency`, `e1_strategy_distribution`,
+`e3_feature_ablation`, `e4_threshold_sensitivity`. Two were skipped and both
+skips are recorded in `experiments/phase7/figures/figures_manifest.json`:
+`quality_vs_cost` (no arm carries both `recall_at_5` and `estimated_cost_usd`,
+because every run was retrieval-only) and `escalation_transitions` (zero
+transitions in the 107 frozen-configuration adaptive rows supplied, so there is
+nothing to plot; an all-zero chart would instead claim the router declined to
+escalate, which those rows cannot establish — three escalations do exist in the
+0.7 calibration arm).
+
+### Validation
+
+* **729 offline deterministic tests pass, 2 deselected** (`.venv/bin/python -m
+  pytest -q`), one matplotlib `Axes3D` import warning. No credentials, no
+  network, no live index.
+* **14/14 architecture guards green** (`tests/test_architecture_guards.py`).
+* No change to `src/`, `tests/`, or `experiments/` was needed to produce this
+  entry or the results report.
+
+### Definition of Done — PARTIAL
+
+Met:
+
+* [x] Five-arm environment gate, cost table re-measured and frozen, harness,
+      registry, row export, and CLI in place (7.0a-7.0c, above)
+* [x] Adaptive-vs-fixed comparison executed — E1 over 107 paired queries, with
+      Holm-corrected paired statistics against bm25
+* [x] Ablation program executed against the built harness — E2, E3
+* [x] Threshold calibration executed — E4 and E5 sweeps over the built harness
+* [x] E6, E7, E8 analyses produced from the E1-E3 runs
+
+Not met, or only partially met:
+
+* [ ] **Escalation is measured but not characterised.** E8 produced **zero
+  transitions** at the frozen threshold, so what escalation buys per transition
+  is unmeasured on this run; the escalation-transitions figure and table are
+  empty by observation, not by omission.
+* [ ] **E4's `max_escalation_steps` sweep is unanalysable, not null.** The 188
+  rows were excluded with the limitation flagged: the 0.5 gate never fires, and
+  `allows_escalation()` is called once with a hardcoded `steps_taken=0` in a
+  loop-free `retrieve()`, so steps 1/2/3 are structurally identical.
+* [ ] **E6 measures the decision layer only.** Four stage clocks
+  (`reranking_latency_ms`, `candidate_generation`, `generation`,
+  `query_embedding`) have n = 0 because no query escalated.
+* [ ] **No cost dollar figures.** `estimated_cost_usd` has no data
+  (`n_pairs = 0`) in every study; all runs were retrieval-only.
+* [ ] **Calibration was swept one axis at a time, not on a joint grid**, so the
+  per-axis best was never validated in combination. The shipped default is used
+  because it is the only setting exercised end to end.
+* [ ] **E7's `comparative` and `multi_document` cells are below `min_cell=5`**
+  on each split individually; only the pooled cell is reported, descriptively.
+* [ ] **No adaptive-vs-hybrid p-value exists.** E1 tests every arm against
+  bm25; "adaptive == hybrid" rests on identical Recall@5/Hit@5 on 107/107, not
+  on a paired test.
+* [ ] **nDCG@5 is not textbook nDCG** — its IDCG denominator is derived from the
+  trace's own retrieved chunks, so it is not comparable to a textbook value.
 
 ## Next steps
 
-> Phase 7 E-series — adaptive-vs-fixed evaluation and ablations.
+> Not a new phase. Two Phase 6 changes are recommended and neither is in scope
+> here.
 
-The foundation is measured and frozen. The evaluation and ablation program,
-failure-mode analysis, and threshold calibration remain unstarted.
+1. **Decide the rerank rung.** ADR-028 recommends removing `hybrid_rerank` from
+   the router's strategy set and terminating the ladder on hybrid. That is a
+   Phase 6 router change.
+2. **Recalibrate the sufficiency gate** inside the observed score range
+   (0.6-0.65), validated on a **joint grid with `cost_weight`** rather than the
+   independent sweeps used here, and report on the held-out test split.
+3. **Then re-run E1/E8.** Until the gate can open and the ladder terminates on
+   a quality-positive rung, "adaptive == hybrid" is an artifact of a gate that
+   never fires, not evidence that routing is unnecessary.
+
+The measurement foundation is frozen, the harness is in place, and the honest
+negative result is recorded. Full numbers, provenance, and per-study
+limitations: `docs/phase_7_results.md`.

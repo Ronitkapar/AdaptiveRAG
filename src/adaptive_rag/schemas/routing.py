@@ -153,6 +153,26 @@ class RoutingTrace(BaseModel):
     Carried on `RetrievalMetadata.routing`, so the routing story travels with the
     response itself and reaches the experiment trace without the retriever keeping
     mutable per-query state.
+
+    `initial_chunk_ids` / `initial_document_ids` are the Phase 7 measurement hook
+    for the *discarded* pre-escalation evidence: the first stage's ranked results,
+    in rank order. They are populated **only when the query actually escalated**,
+    because a query that did not escalate kept its initial results as the final
+    ones (`adaptive.py` returns `final = initial`), so its "quality before" is
+    already the persisted `retrieval.results` and re-recording it would only
+    duplicate bytes. `None` therefore means "not recorded because nothing was
+    discarded", and stays distinguishable from `[]` ("recorded, and the first
+    stage returned nothing"). This mirrors the Phase 5 reranking fields on
+    `ExperimentTrace`, which are likewise absent on runs that never reranked.
+
+    Scores are deliberately not captured: retrieval quality (recall, precision,
+    hit, nDCG, MRR) is computed from ranked `chunk_id` and `document_id` alone, and
+    the score scales of BM25, cosine similarity, and a cross-encoder are not
+    comparable across stages, so a persisted score would invite an invalid
+    "score improved" comparison.
+
+    Every field is optional so traces persisted before this extension keep
+    validating unchanged under `extra="forbid"`.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -162,6 +182,9 @@ class RoutingTrace(BaseModel):
     initial_strategy: StrategyName
     initial_latency_ms: float
     initial_result_count: int
+    # Discarded pre-escalation evidence, rank-ordered; None unless escalation ran.
+    initial_chunk_ids: list[str] | None = None
+    initial_document_ids: list[str] | None = None
     sufficiency: SufficiencyDecision | None = None
     escalation: EscalationDecision | None = None
     final_strategy: StrategyName
