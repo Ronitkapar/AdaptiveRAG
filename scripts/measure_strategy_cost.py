@@ -79,7 +79,8 @@ from adaptive_rag.experiments.config import (  # noqa: E402
     compute_corpus_version,
     instantiate_components,
 )
-from adaptive_rag.schemas.config import RoutingConfig  # noqa: E402
+from adaptive_rag.schemas import PHASE8_INDEX_NAMESPACES  # noqa: E402
+from adaptive_rag.schemas.config import IndexConfig, RoutingConfig  # noqa: E402
 
 
 def _load_gate_module() -> Any:
@@ -229,6 +230,7 @@ def run_sweep(
     repetitions: int,
     warmup: int,
     arm_names: Sequence[str],
+    corpus_arm: str = IndexConfig().corpus_arm,
     pace_seconds: float = DEFAULT_PACE_SECONDS,
 ) -> dict[str, Any]:
     """Execute the protocol and return the artifact."""
@@ -236,7 +238,14 @@ def run_sweep(
     if not examples:
         raise RuntimeError(f"no evaluation examples in {dataset_path}")
 
-    common = build_experiment_config(name="phase7_cost_sweep_common")
+    # `corpus_arm` selects which index the sweep measures against. Without it the
+    # default would silently pick `phase8_after` and a "before" measurement would
+    # be recorded from after-arm indexes -- a number that is real, wrong, and
+    # impossible to tell apart from a correct one.
+    common = build_experiment_config(
+        name="phase7_cost_sweep_common",
+        index=IndexConfig(corpus_arm=corpus_arm),
+    )
     arms = build_arms(common)
     verify_shared_conditions(common, arms)
     verify_arm_configs(arms)
@@ -332,6 +341,12 @@ def run_sweep(
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "git_commit": _git_commit(),
                 "corpus_version": common.corpus_version,
+                # The two Phase 8 arms are built from the same PDFs through the
+                # same pipeline version, so they share `corpus_version` and it
+                # cannot tell their cost tables apart. The arm is recorded
+                # alongside it for the same reason the index namespaces are:
+                # a cost artifact has to be traceable to the text it measured.
+                "corpus_arm": corpus_arm,
                 "config_hash": common.config_hash,
                 "dataset": {
                     "path": str(dataset_path.relative_to(REPO_ROOT)),
@@ -363,6 +378,8 @@ def _print_report(artifact: dict[str, Any]) -> None:
     print(f"strategy_cost_ms re-measurement -- {artifact['measurement_version']}")
     prov = artifact["provenance"]
     print(f"  corpus   {prov['corpus_version']}")
+    if prov.get("corpus_arm"):
+        print(f"  arm      {prov['corpus_arm']}")
     print(f"  dataset  {prov['dataset']['path']} "
           f"({prov['dataset']['n_examples']} examples, "
           f"sha256={prov['dataset']['sha256']})")
@@ -427,6 +444,16 @@ def main() -> int:
         help="Comma-separated subset of arms to measure.",
     )
     parser.add_argument(
+        "--corpus-arm",
+        choices=sorted(PHASE8_INDEX_NAMESPACES),
+        default=IndexConfig().corpus_arm,
+        help=(
+            "Which corpus arm to price. The two Phase 8 arms share a corpus "
+            "version, so a cost table cannot be attributed to one of them after "
+            "the fact; it is recorded in the artifact's provenance."
+        ),
+    )
+    parser.add_argument(
         "--out", type=Path,
         default=REPO_ROOT / "experiments" / "phase7" / "strategy_cost_ms.json",
     )
@@ -448,6 +475,7 @@ def main() -> int:
         repetitions=args.repetitions,
         warmup=args.warmup,
         arm_names=[name.strip() for name in args.arms.split(",") if name.strip()],
+        corpus_arm=args.corpus_arm,
         pace_seconds=args.pace,
     )
 

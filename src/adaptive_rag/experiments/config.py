@@ -64,9 +64,31 @@ COMPONENT_VERSIONS = {
 
 
 def compute_corpus_version(manifest_path: Path = PAPERS_MANIFEST_PATH) -> str:
-    """Fingerprint the corpus: manifest bytes plus every raw PDF hash."""
+    """Fingerprint the corpus: manifest bytes, raw PDF hashes, extraction version.
+
+    The extraction version is part of the fingerprint, not an incidental detail of
+    it. The raw PDFs are not the corpus -- the corpus is what the ingestion
+    pipeline produced from them, and Phase 8 changed that pipeline without changing
+    a single PDF. Folding the ingestion version in is what makes the staleness
+    guard on the BM25 index mean what it says: two corpora sharing a
+    `corpus_version` really do share the same chunk text.
+
+    The values recorded before this change (`corpus_6c416f423920385d`) were
+    computed without the ingestion version and are not reproducible by this
+    function. They stay valid as the fingerprints of the artifacts that carry them
+    -- see `docs/phases/phase-8.md` section 4.
+    """
     manifest_bytes = manifest_path.read_bytes()
-    parts = [str(compute_config_hash({"manifest": manifest_bytes.decode("utf-8", "ignore")}))]
+    parts = [
+        str(
+            compute_config_hash(
+                {
+                    "manifest": manifest_bytes.decode("utf-8", "ignore"),
+                    "ingestion_version": IngestionConfig().ingestion_version,
+                }
+            )
+        )
+    ]
 
     manifest = json.loads(manifest_bytes.decode("utf-8"))
     for paper in manifest:
@@ -203,15 +225,31 @@ def _shared_qdrant_client() -> Any:
         ) from exc
 
 
+def _bm25_index_path(config: "ExperimentConfig") -> Path:
+    """Where this experiment's lexical index lives, resolved against the repo root.
+
+    The path is stored on `IndexConfig` relative to the repository so a config
+    stays portable and hashable, and resolved here because every retrieval
+    strategy must agree on the file -- a BM25 arm and a hybrid arm that resolved
+    it differently would be comparing different corpora under one experiment id.
+    """
+    path = Path(config.index.bm25_index_path)
+    return path if path.is_absolute() else REPO_ROOT / path
+
+
 def _build_bm25(
-    config: ExperimentConfig, constituent: "RetrievalConfig", client: Any = None
+    config: "ExperimentConfig", constituent: "RetrievalConfig", client: Any = None
 ) -> tuple[Any, Any]:
     """Build a real BM25 retriever plus the index it holds open.
 
     `client` is accepted and ignored so every strategy builder shares one
     signature; see `_shared_qdrant_client` for why the adaptive arm needs it.
     """
-    bm25_index = BM25Index.load(expected_corpus_version=config.corpus_version)
+    bm25_index = BM25Index.load(
+        _bm25_index_path(config),
+        expected_corpus_version=config.corpus_version,
+        expected_corpus_arm=config.index.corpus_arm,
+    )
     return (
         BM25Retriever(
             index=bm25_index,
@@ -269,7 +307,11 @@ def _build_hybrid(
             update={"candidate_k": config.retrieval.rerank_candidate_k}
         )
 
-    bm25_index = BM25Index.load(expected_corpus_version=config.corpus_version)
+    bm25_index = BM25Index.load(
+        _bm25_index_path(config),
+        expected_corpus_version=config.corpus_version,
+        expected_corpus_arm=config.index.corpus_arm,
+    )
     vector_store = QdrantVectorStore(config=config.index, client=client)
     hybrid = HybridRetriever(
         dense_retriever=DenseRetriever(
@@ -391,7 +433,9 @@ def instantiate_components(config: ExperimentConfig, client: Any = None):
 
     if config.retrieval.retrieval_method in ("bm25", "bm25_rerank"):
         bm25_index = BM25Index.load(
+            _bm25_index_path(config),
             expected_corpus_version=config.corpus_version,
+            expected_corpus_arm=config.index.corpus_arm,
         )
         retriever = BM25Retriever(
             index=bm25_index,
@@ -420,7 +464,9 @@ def instantiate_components(config: ExperimentConfig, client: Any = None):
                 update={"candidate_k": config.retrieval.rerank_candidate_k}
             )
         bm25_index = BM25Index.load(
+            _bm25_index_path(config),
             expected_corpus_version=config.corpus_version,
+            expected_corpus_arm=config.index.corpus_arm,
         )
         embedding_model = AICreditsEmbeddingModel(config=config.embedding)
         vector_store = QdrantVectorStore(config=config.index, client=client)

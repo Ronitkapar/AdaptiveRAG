@@ -770,7 +770,7 @@ def test_instantiate_components_returns_plain_retrievers_when_reranking_is_off(
 
     class _Index:
         @staticmethod
-        def load(expected_corpus_version=None):
+        def load(file_path=None, expected_corpus_version=None, expected_corpus_arm=None):
             return index
 
     monkeypatch.setattr(exp_config, "BM25Index", _Index)

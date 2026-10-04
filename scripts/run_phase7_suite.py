@@ -79,6 +79,7 @@ from adaptive_rag.evaluation.suite import (  # noqa: E402
 from adaptive_rag.errors import AdaptiveRAGError  # noqa: E402
 from adaptive_rag.experiments.arms import ARM_NAMES, build_arms  # noqa: E402
 from adaptive_rag.experiments.config import build_experiment_config  # noqa: E402
+from adaptive_rag.schemas import PHASE8_INDEX_NAMESPACES, IndexConfig  # noqa: E402
 
 SPLIT_CHOICES = (SPLIT_CALIBRATION, SPLIT_TEST, "all")
 
@@ -270,6 +271,18 @@ def main(argv: list[str] | None = None) -> int:
             "find them; set a prefix when running the same study twice."
         ),
     )
+    parser.add_argument(
+        "--corpus-arm",
+        choices=sorted(PHASE8_INDEX_NAMESPACES),
+        default=IndexConfig().corpus_arm,
+        help=(
+            "Which corpus arm to retrieve from: 'phase8_before' (two-column "
+            "reading order left broken) or 'phase8_after' (the column fix). The "
+            "arms share a corpus version, so this selects the collection and the "
+            "lexical index together and is checked on load. Use "
+            "--run-prefix when running the same study on both arms."
+        ),
+    )
     parser.add_argument("--json-only", action="store_true")
     args = parser.parse_args(argv)
 
@@ -293,7 +306,10 @@ def main(argv: list[str] | None = None) -> int:
         else None
     )
 
-    common = build_experiment_config(name="phase7_suite_common")
+    common = build_experiment_config(
+        name="phase7_suite_common",
+        index=IndexConfig(corpus_arm=args.corpus_arm),
+    )
     arms = None
     if arm_names:
         built = build_arms(common)

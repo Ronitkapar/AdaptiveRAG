@@ -82,6 +82,7 @@ confident, meaningless p-value.
 
 from __future__ import annotations
 
+from itertools import combinations
 from typing import Any, Iterable, Literal, Mapping, Sequence
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -709,6 +710,154 @@ def compare_variants(
     )
 
 
+def compare_all_pairs(
+    rows: Sequence[Any],
+    *,
+    systems: Sequence[str],
+    metrics: Sequence[str],
+    group_column: str = "system",
+    seed: int = DEFAULT_SEED,
+    n_resamples: int = DEFAULT_N_RESAMPLES,
+    confidence: float = DEFAULT_CONFIDENCE,
+    alpha: float = DEFAULT_ALPHA,
+) -> dict[str, Any]:
+    """Every unordered pair of systems, Holm-corrected within each metric.
+
+    This is the pre-registered Phase 8 family, written into
+    `docs/phases/phase-8.md` §2.2 before the new corpus existed: five systems,
+    **all** C(5,2) = 10 pairs via `itertools.combinations`, on
+    `recall_at_5`, `mrr`, `ndcg_at_5`, and `total_latency_ms`, with
+    `family_size` recorded per metric.
+
+    The difference from `paired_comparisons` is exactly two things -- which pairs
+    are enumerated, and what family the correction is applied over -- so
+    `compare_metric` is reused unchanged. A baseline-anchored family of four
+    comparisons answers "is anything better than bm25"; this answers "which of
+    these five orderings are distinguishable from which", which is the question a
+    before/after corpus study actually needs.
+
+    Pair *direction* is arbitrary in principle and fixed in practice: within each
+    pair the later system in `systems` is the treatment, so
+    `systems=("bm25", "dense", ...)` reports `dense`-vs-`bm25` for the pairs it
+    shares with `compare_systems`. Every test is two-sided, so this choice cannot
+    change a verdict -- only which system the signed difference summary reads
+    from.
+
+    A system absent from the rows is **not** silently dropped: it is listed in
+    `pairs_absent` and every pair that would have included it is reported with
+    `n_pairs = 0` rather than being deleted from the family, because dropping
+    pairs after the fact is precisely what a pre-registration forbids.
+    """
+    requested = list(systems)
+    if len(set(requested)) != len(requested):
+        raise PairingError(
+            f"systems contains a duplicate name: {requested}. Each system must "
+            "appear once, or a pair would be counted twice."
+        )
+
+    grouped = _group_rows(rows, group_column)
+    present = [name for name in requested if name in grouped]
+    absent = [name for name in requested if name not in grouped]
+    if len(present) < 2:
+        raise PairingError(
+            f"all-pairs comparison needs at least 2 systems with rows; "
+            f"{len(present)} of {len(requested)} are present "
+            f"(absent: {absent})"
+        )
+
+    by_metric: dict[str, list[dict[str, Any]]] = {metric: [] for metric in metrics}
+    comparisons: list[dict[str, Any]] = []
+    pair_log: list[dict[str, Any]] = []
+    for metric in metrics:
+        for first, second in combinations(present, 2):
+            if first in absent or second in absent:
+                continue
+            # `combinations` yields the earlier system first, so the pair is
+            # reported later-against-earlier. That is the direction a reader
+            # expects -- "is the arm added after bm25 better than bm25" -- and it
+            # makes `systems=("bm25", "dense", ...)` behave like the
+            # baseline-anchored family for the pairs the two have in common.
+            # The p-value is two-sided, so the direction cannot change the verdict;
+            # it only decides which system the signed difference summary reads from.
+            treatment, baseline = second, first
+            comparison = compare_metric(
+                grouped[treatment],
+                grouped[baseline],
+                metric=metric,
+                treatment=treatment,
+                baseline=baseline,
+                seed=seed,
+                n_resamples=n_resamples,
+                confidence=confidence,
+                alpha=alpha,
+            )
+            by_metric[metric].append(comparison)
+            comparisons.append(comparison)
+            pair_log.append({"metric": metric, "treatment": treatment, "baseline": baseline})
+
+    for metric, family in by_metric.items():
+        pvalues = [c["p_value"] for c in family if c["p_value"] is not None]
+        adjusted = holm_bonferroni(pvalues) if pvalues else []
+        cursor = 0
+        for comparison in family:
+            if comparison["p_value"] is None:
+                continue
+            comparison["adjusted_p_value"] = adjusted[cursor]
+            comparison["significant"] = adjusted[cursor] < alpha
+            # Two family sizes, because they answer different questions and a
+            # reader who cannot tell them apart cannot tell what the p-value was
+            # corrected against: `family_size_requested` is what the
+            # pre-registration fixed (C(n_requested, 2)) and never changes, while
+            # `family_size` is what Holm actually divided by, and shrinks when a
+            # pair had no evaluable value.
+            comparison["family_size"] = len(pvalues)
+            comparison["family_size_requested"] = (
+                len(requested) * (len(requested) - 1) // 2
+            )
+            cursor += 1
+
+    return {
+        "statistics_version": STATISTICS_VERSION,
+        "group_column": group_column,
+        "comparison_design": "all unordered pairs",
+        "pair_enumeration": (
+            "itertools.combinations over the systems given, in order; within each "
+            "pair the later system is the treatment"
+        ),
+        "systems_requested": requested,
+        "systems_present": present,
+        "systems_absent": absent,
+        "n_systems_present": len(present),
+        # Evaluable pairs, so this agrees with the comparison count. The requested
+        # count is on every comparison as `family_size_requested`.
+        "n_pairs_per_metric": len(present) * (len(present) - 1) // 2,
+        "n_pairs_requested_per_metric": len(requested) * (len(requested) - 1) // 2,
+        "metrics": list(metrics),
+        "alpha": alpha,
+        "bootstrap_seed": seed,
+        "bootstrap_resamples": n_resamples,
+        "bootstrap_confidence": confidence,
+        "n_rows": len(rows),
+        "test_selection_rule": TEST_SELECTION_RULE,
+        "family_correction_note": (
+            "Holm-Bonferroni is applied within each metric across ALL "
+            "C(n,2) pairs, not against a baseline subset; family_size and "
+            "family_size_requested are both on every comparison. This family is "
+            "pre-registered in docs/phases/phase-8.md section 2.2 and is "
+            "post-hoc with respect to Phase 7's E1 point estimates, which were "
+            "observed before it was specified."
+        ),
+        "preregistration": (
+            "docs/phases/phase-8.md section 2 -- written before the new corpus "
+            "existed; post-hoc/exploratory within this program because Phase 7's "
+            "ordering motivated it"
+        ),
+        "pairs": pair_log,
+        "by_metric": by_metric,
+        "comparisons": comparisons,
+    }
+
+
 class StatisticsSettings(BaseModel):
     """The reproducibility record carried on every statistics artifact."""
 
@@ -763,6 +912,7 @@ __all__ = [
     "TEST_SELECTION_RULE",
     "PairingError",
     "StatisticsSettings",
+    "compare_all_pairs",
     "compare_metric",
     "compare_systems",
     "compare_variants",

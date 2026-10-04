@@ -1219,11 +1219,20 @@ def test_adaptive_real_index_surfaces_the_expected_document():
 
 
 def _client_probe_index(index):
-    """A BM25Index stand-in whose `load` returns `index`."""
+    """A BM25Index stand-in whose `load` returns `index`.
+
+    `load` takes the index path as its first positional argument and an
+    `expected_corpus_arm` the builders pass, so both are accepted here.
+    """
     return type(
         "_Index",
         (),
-        {"load": staticmethod(lambda expected_corpus_version=None: index)},
+        {
+            "load": staticmethod(
+                lambda file_path=None, expected_corpus_version=None,
+                expected_corpus_arm=None: index
+            )
+        },
     )
 
 

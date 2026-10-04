@@ -38,6 +38,7 @@ Evaluation will consider:
 | Phase 5 — Reranking                | COMPLETE                                    |
 | Phase 6 — Adaptive Routing         | IMPLEMENTATION COMPLETE / OFFLINE VALIDATED |
 | Phase 7 — Evaluation & Ablations   | E-SERIES EXECUTED / DoD PARTIAL           |
+| Phase 8 — Corpus Fix Study         | QUALITY STUDY COMPLETE / COST MEASURED, NOT FROZEN |
 
 ---
 
@@ -990,3 +991,130 @@ Not met, or only partially met:
 The measurement foundation is frozen, the harness is in place, and the honest
 negative result is recorded. Full numbers, provenance, and per-study
 limitations: `docs/phase_7_results.md`.
+
+---
+
+# Phase 8 — Corpus Fix Study
+
+Status: QUALITY STUDY COMPLETE / COST MEASURED, NOT FROZEN
+
+## What was done
+
+A two-column extraction defect in `ingestion/normalizer.py` was found to be
+splicing the left and right columns of every two-column page together mid-sentence.
+It was fixed with column detection and gutter-aware line clustering, then measured
+as a **before/after study** over two corpora built from the same PDFs and the same
+chunking config, differing only in whether the fix ran:
+
+| | Path | Chunks |
+|---|---|---|
+| before | `data/processed_phase8_before/` | 618 |
+| after | `data/processed_phase8_after/` | 613 |
+
+Validation gates all passed: residual interleaving 0, 77 of 285 pages detected as
+two-column, 7009 word pairs repaired, single-column extraction byte-identical to
+the previous behaviour, reading order verified.
+
+## What was found
+
+1. **The fix changed no quality metric significantly.** Across all five E1 arms,
+   no recall@5 or MRR before/after delta survives Holm correction at n=107. Four
+   arms nudge up, `dense` nudges down, none is distinguishable from zero.
+2. **The reranker did not improve — and that is the finding.** `hybrid_rerank`
+   moved by -0.0016 recall@5 (99 of 107 queries tied) and its penalty against
+   `hybrid` grew slightly. The corpus defect was not the mechanism behind Phase 7's
+   rerank result. Both pre-registered outcomes that would have *rescued* the
+   reranker are ruled out by measurement.
+3. **Two apparent latency findings were withdrawn.** `dense` (+411 ms) and
+   `hybrid_rerank` (+112 ms) reached significance, but both sit in the
+   query-embedding API call, which embeds the query rather than the corpus. The
+   `bm25` control arm makes no API call and moved 1.83 -> 1.85 ms; the reranker's
+   local ONNX stage moved -2.3 ms. The corpus fix's latency effect is ~0, and the
+   paired tests had detected provider variance.
+4. **`nDCG@5` and E8 are not measured.** The gold section labels are themselves
+   corrupt: 47 of 140 spliced, 40 unresolvable on the fixed corpus. Reported as
+   not measured rather than computed on labels of unknown provenance.
+5. **A measurement-integrity failure nearly inverted the headline.** 13 of 29 arms
+   in the first sweep silently lost embedding calls; every suite still reported
+   `ok` with a full trace count. The contaminated reranker arm read 0.6384 where
+   its true value is 0.352 and its clean re-run is 0.7072 — inverting the sign of
+   the reranker's before/after result.
+
+## ADR-028
+
+Revised. The rerank-rung removal recommendation **stands** and no longer depends on
+the defect being fixed, but its stated cause — model mismatch with column-interleaved
+prose — is **withdrawn**. See `docs/decision.md`.
+
+## Routing ceiling (offline, added after Phase 8)
+
+Question: does routing by query characteristic have *any* headroom on this
+benchmark, or is Phase 7's `adaptive ≡ hybrid` the whole story? Measured offline
+from the five clean E1 arms — no index, no API, deterministic across runs
+(`experiments/phase8/oracle_ceiling.json`, §8 of the results doc).
+
+| | `after` (shipping) | `before` (replication) |
+|---|---|---|
+| best fixed | `dense` 0.8988 | `dense` 0.9143 |
+| oracle (per-query) | 0.9206 | 0.9486 |
+| delta | **+0.0218** | **+0.0343** |
+| frontier(0.01) latency saving | −845.84 ms | −398.30 ms |
+| gate verdict | `routing_has_headroom` | `routing_has_headroom` |
+
+Three qualifications, all of which travel with the number:
+
+1. **The gain rides on 4 of 107 queries** (`before`: 6). `recall_at_5` takes only
+   four distinct values because 92 of 107 queries have a single relevant
+   document, so the five strategies tie at the maximum on 98 queries and the
+   after-arm delta clears its +0.02 threshold by 0.0018 — about two queries.
+2. **The ceiling is not detectable.** 8 queries need `dense`, 99 do not, and
+   nothing separates them: `sufficiency_score` p = 0.4989, `coverage` p = 0.9078,
+   `category` p = 0.0567, no sufficiency signal at α = 0.05. Both scalars run the
+   *wrong way* — sufficiency is higher where a cheaper strategy already suffices.
+   The gate's latency branch therefore fails despite the −845.84 ms headline.
+3. **The oracle's MRR is worse** than the best fixed strategy's (0.8224 vs
+   0.8645), a cost the recall@5-and-latency gate does not price.
+
+Net: routing headroom is **non-zero but not bankable** by the shipped
+mechanism. Phase 7's equivalence is not evidence that routing is worthless —
+it is evidence that the router never routed.
+
+Stage 2 prerequisite, answered: `build_experiment_config` **can** express the
+reduced strategy set, but `run_phase7_suite.py` exposes no routing flags, so the
+re-run cannot be configured through it as the plan's command assumes. Flagged,
+not changed.
+
+## Next steps
+
+1. **Decide whether to freeze `strategy_cost_ms`** — recommendation now made,
+   awaiting a user call: **do not freeze**. Full evidence in
+   `docs/strategy-cost-freeze-decision.md`. Summary: the two arms disagree by
+   25% on `dense`, but that is provider variance inside the query-embedding call
+   (the `bm25` control moved 2.48 → 2.12 ms), and on the *normalised* ratio the
+   router actually consumes (`rule_based.py:148-157`) the disagreement is 5.3% —
+   a 0.008 shift in the score penalty against rule weights of 0.2–1.5. Freezing
+   would pin the unstable representation (absolute ms) and leave the stable one
+   (ratios) unpinned. `strategy_cost_ms` remains untouched.
+2. **`nDCG@5` / E8 unblocking — route measured, found blocked.** Only **22** of
+   the 47 corrupt labels are safely repairable, not the 37 the Step 4 audit
+   called high-confidence (`experiments/phase8/gold_label_repair.json`). 15 of
+   those 37 have no clean reconstruction; 3 resolve only to paths that are
+   themselves spliced. Root cause is upstream: the **fixed corpus still carries
+   42 spliced section paths** (down from 52), so label repair alone cannot make
+   the metric trustworthy. Fix the corpus's section paths, then repair labels and
+   read the remainder. No labels were rewritten.
+3. **Act on ADR-028** — a Phase 6 router change, out of scope here.
+4. **Add a no-API control arm to any future latency comparison** on this hardware;
+   `total_latency_ms` alone cannot distinguish provider variance from system cost.
+5. **Decide whether to run Stage 2 at all**, and if so through a runner that can
+   actually pass the routing override (the suite runner cannot — see above).
+   Recommendation: not as a routing test. Under ADR-028's rung removal,
+   escalation from `hybrid` is a no-op by construction, so it would measure an
+   unreachable path.
+6. **Treat the 4–6 ceiling-carrying queries as the only real target.** Any future
+   router work is a `detect-those` problem, not a `route-everything` problem —
+   and 4–6 positives is too few to fit anything without a held-out split
+   (ADR-027).
+
+Full numbers, provenance, and limitations: `docs/phase-8-results.md`.
+Phase plan and per-step detail: `docs/phases/phase-8.md`.

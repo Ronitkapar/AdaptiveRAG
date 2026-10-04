@@ -12,7 +12,7 @@ import struct
 from typing import Sequence
 
 from adaptive_rag.config.hashing import canonical_json, compute_config_hash, compute_sha256
-from adaptive_rag.config.paths import CHUNKS_DIR, EMBEDDINGS_DIR, PROCESSED_DATA_DIR
+from adaptive_rag.config.paths import CHUNKS_DIR, EMBEDDINGS_DIR
 from adaptive_rag.embeddings.base import EmbeddingModel
 from adaptive_rag.embeddings.cache import EmbeddingCache, derive_cache_key
 from adaptive_rag.schemas import Chunk, EmbeddingConfig
@@ -124,8 +124,12 @@ class EmbeddingPipeline:
 
             summary[doc_id] = len(vectors)
 
-        # Save embeddings manifest
-        manifest_path = PROCESSED_DATA_DIR / "embeddings_manifest.json"
+        # Beside the embeddings it describes, not at a fixed location: Phase 8
+        # embeds into its own directory while Phase 7's artifacts stay in place as
+        # the study's "before" arm, and one corpus's manifest must not overwrite
+        # the other's.
+        manifest_path = out_dir.parent / "embeddings_manifest.json"
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
         manifest_path.write_text(
             canonical_json({
                 "model_id": self.model.model_id,

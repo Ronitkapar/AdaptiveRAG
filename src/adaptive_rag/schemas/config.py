@@ -17,7 +17,7 @@ class IngestionConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     extractor_backend: Literal["pdfplumber"] = "pdfplumber"
-    ingestion_version: str = "ingestion_v2"
+    ingestion_version: str = "ingestion_v3"
     min_page_chars_warning: int = 100
     extract_tables: bool = True
     extract_figures: bool = True
@@ -58,10 +58,71 @@ class IndexConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    index_version: str = "index_v1"
-    collection_name: str = "adaptiverag_dense_v1"
+    index_version: str = "index_v2"
+    # Which Phase 8 corpus arm this experiment reads. The arms differ only in
+    # whether two-column reading order was handled correctly, so naming the arm is
+    # the whole of what distinguishes one Phase 8 run from the other -- and getting
+    # it wrong would silently compare a corpus with itself.
+    #
+    # "phase7" is the historical namespace: the `adaptiverag_dense_v1` collection
+    # and `storage/bm25/bm25_index.json` that Phase 7 actually evaluated (713
+    # chunks). It is kept loadable as the record of that study, and is NOT a valid
+    # Phase 8 arm -- see `docs/phases/phase-8.md` section 4.
+    corpus_arm: Literal["phase7", "phase8_before", "phase8_after"] = "phase8_after"
+    # Distinct collections, never a rebuild. `ensure_collection` reuses an existing
+    # collection of the same name unless `recreate=True`, so sharing a name across
+    # arms would leave each arm's retired chunk ids in the other's index and every
+    # dense retrieval would return vectors for chunks that no longer exist.
+    collection_name: str = "adaptiverag_dense_v2_after"
+    # Likewise for the lexical index: one file per arm, and pointing this at the
+    # wrong one is caught by the corpus-version guard on load.
+    bm25_index_path: str = "storage/bm25/bm25_index_phase8_after.json"
     distance: Literal["cosine", "dot", "euclidean"] = "cosine"
     batch_size: int = 128
+
+    @model_validator(mode="after")
+    def _namespace_follows_arm(self) -> "IndexConfig":
+        """Derive the collection and lexical index from the arm.
+
+        Without this, `corpus_arm` would be documentation rather than behaviour: a
+        caller selecting an arm could still point at another arm's collection and
+        lexical index, and the run would quietly compare the wrong corpus with
+        itself. Explicit values are honoured so a one-off namespace stays possible,
+        but a silent arm/index mismatch is not.
+
+        The corpus-version guard on the lexical index catches half of this mistake
+        on its own; nothing catches a wrong *collection*, because a collection
+        carries no corpus version.
+        """
+        expected = PHASE8_INDEX_NAMESPACES[self.corpus_arm]
+        updates = {}
+        if self.collection_name == IndexConfig.model_fields["collection_name"].default:
+            updates["collection_name"] = expected["collection_name"]
+        if self.bm25_index_path == IndexConfig.model_fields["bm25_index_path"].default:
+            updates["bm25_index_path"] = expected["bm25_index_path"]
+        for field, value in updates.items():
+            setattr(self, field, value)
+        return self
+
+
+# Every Phase 8 corpus arm's index namespace. Kept beside `IndexConfig` so the
+# mapping from arm to storage is stated once: a run that selects an arm must select
+# its collection and its lexical index together, and two hand-maintained lists would
+# eventually disagree.
+PHASE8_INDEX_NAMESPACES: dict[str, dict[str, str]] = {
+    "phase7": {
+        "collection_name": "adaptiverag_dense_v1",
+        "bm25_index_path": "storage/bm25/bm25_index.json",
+    },
+    "phase8_before": {
+        "collection_name": "adaptiverag_dense_v2_before",
+        "bm25_index_path": "storage/bm25/bm25_index_phase8_before.json",
+    },
+    "phase8_after": {
+        "collection_name": "adaptiverag_dense_v2_after",
+        "bm25_index_path": "storage/bm25/bm25_index_phase8_after.json",
+    },
+}
 
 
 class DenseRetrievalConfig(BaseModel):

@@ -18,6 +18,8 @@ byte-reproducible on any machine.
 from __future__ import annotations
 
 import json
+from itertools import combinations
+from typing import Any, Sequence
 
 import pytest
 
@@ -27,6 +29,7 @@ from adaptive_rag.evaluation.statistics import (
     DEFAULT_SEED,
     TEST_SELECTION_RULE,
     PairingError,
+    compare_all_pairs,
     compare_metric,
     compare_systems,
     compare_variants,
@@ -613,3 +616,180 @@ def test_e3_feature_ablation_compares_all_against_full():
         assert c["treatment"].startswith("without_")
     assert e3_report["baseline"] == "full"
     assert e3_report["groups_absent"] == []
+
+
+# --------------------------------------------------------------------------
+# Phase 8 all-pairs comparison family
+# --------------------------------------------------------------------------
+
+
+def _five_arm_rows(offsets: dict[str, float] | None = None) -> list[dict[str, Any]]:
+    """The five Phase 8 systems over the same 8 queries."""
+    offsets = offsets or {
+        "bm25": 0.0,
+        "dense": 0.12,
+        "hybrid": 0.08,
+        "hybrid_rerank": 0.04,
+        "adaptive": 0.10,
+    }
+    return [
+        make_row(
+            f"q{i:02d}",
+            system,
+            recall_at_5=0.4 + 0.01 * i + offset,
+            total_latency_ms=100.0 + i + offset * 10,
+        )
+        for system, offset in offsets.items()
+        for i in range(8)
+    ]
+
+
+def test_compare_all_pairs_enumerates_every_unordered_pair():
+    """Five systems must give all C(5,2) = 10 pairs, not a baseline subset.
+
+    The pre-registered family (`docs/phases/phase-8.md` section 2.2) is the whole
+    point: E1 compared each arm against `bm25` only, which answers "is anything
+    better than bm25" and not "which of these five are distinguishable".
+    """
+    systems = ("bm25", "dense", "hybrid", "hybrid_rerank", "adaptive")
+
+    report = compare_all_pairs(
+        _five_arm_rows(),
+        systems=systems,
+        metrics=("recall_at_5", "total_latency_ms"),
+        **FAST,
+    )
+
+    assert report["n_systems_present"] == 5
+    assert report["n_pairs_per_metric"] == 10
+    assert len(report["by_metric"]["recall_at_5"]) == 10
+    assert len(report["by_metric"]["total_latency_ms"]) == 10
+    assert len(report["comparisons"]) == 20
+
+    unordered = {
+        frozenset((c["treatment"], c["baseline"])) for c in report["comparisons"]
+    }
+    expected = {frozenset(pair) for pair in combinations(systems, 2)}
+    assert unordered == expected
+    assert len(unordered) == 10, "each unordered pair must appear exactly once"
+
+
+def test_compare_all_pairs_corrects_within_the_ten_pair_family():
+    """Holm runs across all 10 pairs of a metric, and says how many it divided by.
+
+    `family_size_requested` is pinned separately from `family_size` because they
+    differ whenever a pair had no evaluable value, and a reader who cannot tell
+    those apart cannot tell what the p-value was corrected against.
+    """
+    report = compare_all_pairs(
+        _five_arm_rows(),
+        systems=("bm25", "dense", "hybrid", "hybrid_rerank", "adaptive"),
+        metrics=("recall_at_5",),
+        **FAST,
+    )
+
+    for comparison in report["comparisons"]:
+        assert comparison["family_size"] == 10
+        assert comparison["family_size_requested"] == 10
+        assert comparison["adjusted_p_value"] >= comparison["p_value"]
+        assert comparison["significant"] == (
+            comparison["adjusted_p_value"] < DEFAULT_ALPHA
+        )
+
+
+def test_compare_all_pairs_records_the_disclosure_it_runs_under():
+    """The family is pre-registered but post-hoc, and the artifact must say so.
+
+    Phase 7's E1 ordering was seen before this family was specified, so a reader
+    must not be able to mistake a pre-registered test for an anticipated one.
+    """
+    report = compare_all_pairs(
+        _five_arm_rows(),
+        systems=("bm25", "dense"),
+        metrics=("recall_at_5",),
+        **FAST,
+    )
+
+    assert "docs/phases/phase-8.md section 2" in report["preregistration"]
+    assert "post-hoc" in report["preregistration"]
+    assert "post-hoc" in report["family_correction_note"]
+
+
+def test_compare_all_pairs_reports_an_absent_system_rather_than_dropping_its_pairs():
+    """A missing system is recorded, not silently pruned.
+
+    Dropping pairs after the fact is exactly what a pre-registration forbids, so
+    the omission has to be visible in the artifact.
+    """
+    rows = _five_arm_rows()
+    present = [r for r in rows if r["system"] != "adaptive"]
+
+    report = compare_all_pairs(
+        present,
+        systems=("bm25", "dense", "hybrid", "hybrid_rerank", "adaptive"),
+        metrics=("recall_at_5",),
+        **FAST,
+    )
+
+    assert report["systems_absent"] == ["adaptive"]
+    assert report["systems_present"] == ["bm25", "dense", "hybrid", "hybrid_rerank"]
+    # 4 systems present -> C(4,2) = 6 evaluable pairs, against a requested 10.
+    assert report["n_pairs_per_metric"] == 6
+    assert len(report["comparisons"]) == 6
+    for comparison in report["comparisons"]:
+        assert comparison["family_size"] == 6
+        assert comparison["family_size_requested"] == 10
+
+
+def test_compare_all_pairs_rejects_a_duplicate_system_name():
+    """A duplicate would count one unordered pair twice, inflating the family."""
+    with pytest.raises(PairingError, match="duplicate"):
+        compare_all_pairs(
+            _five_arm_rows(),
+            systems=("bm25", "dense", "bm25"),
+            metrics=("recall_at_5",),
+            **FAST,
+        )
+
+
+def test_compare_all_pairs_needs_two_present_systems():
+    with pytest.raises(PairingError, match="at least 2 systems"):
+        compare_all_pairs(
+            _five_arm_rows(),
+            systems=("bm25",),
+            metrics=("recall_at_5",),
+            **FAST,
+        )
+
+
+def test_compare_all_pairs_shares_pairing_and_correction_with_the_baseline_driver():
+    """The all-pairs family must not be a second implementation of the test.
+
+    `compare_metric` is reused unchanged, so the one pair both drivers share has
+    to come out identical -- if this ever diverges, the difference is in pair
+    enumeration or the correction family, which is the only thing that is
+    supposed to differ.
+    """
+    rows = _five_arm_rows()
+    systems = ("bm25", "dense", "hybrid", "hybrid_rerank", "adaptive")
+
+    all_pairs = compare_all_pairs(
+        rows, systems=systems, metrics=("recall_at_5",), **FAST
+    )
+    anchored = compare_systems(
+        rows, systems=systems, baseline="bm25", metrics=("recall_at_5",), **FAST
+    )
+
+    def _find(report, treatment):
+        return next(
+            c for c in report["comparisons"]
+            if c["treatment"] == treatment and c["baseline"] == "bm25"
+        )
+
+    shared = _find(all_pairs, "dense")
+    reference = _find(anchored, "dense")
+    for field in ("p_value", "test", "n_pairs", "effect"):
+        assert shared[field] == reference[field], field
+    # Only the family the correction is applied over may differ.
+    assert shared["family_size"] == 10
+    assert reference["family_size"] == 4

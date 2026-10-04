@@ -52,11 +52,18 @@ class BM25Index:
         b: float = 0.75,
         corpus_version: str = "",
         index_version: str = "bm25_v1",
+        corpus_arm: str = "",
     ):
         self.k1 = k1
         self.b = b
         self.corpus_version = corpus_version
         self.index_version = index_version
+        # Which corpus arm this index holds. `corpus_version` cannot identify it:
+        # the Phase 8 arms differ only in reading order, so both fingerprint
+        # identically, and a guard keyed on the version would wave through an index
+        # built from the other arm -- which is a run that compares a corpus with
+        # itself and reports it as a result.
+        self.corpus_arm = corpus_arm
 
         # Document storage
         self.doc_ids: list[str] = []
@@ -79,9 +86,12 @@ class BM25Index:
         self,
         chunks: Sequence[Chunk],
         corpus_version: str = "",
+        corpus_arm: str | None = None,
     ) -> int:
         """Build the inverted index from a sequence of Chunk objects."""
         self.corpus_version = corpus_version
+        if corpus_arm is not None:
+            self.corpus_arm = corpus_arm
         self.doc_ids = []
         self.doc_lengths = []
         self.doc_texts = []
@@ -201,6 +211,7 @@ class BM25Index:
         data = {
             "index_version": self.index_version,
             "corpus_version": self.corpus_version,
+            "corpus_arm": self.corpus_arm,
             "k1": self.k1,
             "b": self.b,
             "total_docs": self.total_docs,
@@ -220,8 +231,16 @@ class BM25Index:
         cls,
         file_path: Path = BM25_INDEX_PATH,
         expected_corpus_version: str | None = None,
+        expected_corpus_arm: str | None = None,
     ) -> "BM25Index":
-        """Load index from JSON disk file with integrity and staleness checks."""
+        """Load index from JSON disk file with integrity and staleness checks.
+
+        `expected_corpus_arm` is checked separately from the version because the two
+        are not the same question. The version asks "were these PDFs and this
+        pipeline the ones this run expects?"; the arm asks "is this the reading
+        order this run is measuring?". Only the second one can catch a Phase 8 run
+        pointed at the wrong arm, since both arms share a version by construction.
+        """
         if not file_path.is_file():
             raise IndexUnavailableError(f"BM25 index file not found at {file_path}")
 
@@ -236,11 +255,20 @@ class BM25Index:
                 f"expected '{expected_corpus_version}'"
             )
 
+        index_arm = data.get("corpus_arm", "")
+        if expected_corpus_arm and index_arm != expected_corpus_arm:
+            raise IndexConfigMismatchError(
+                f"BM25 index at {file_path} holds corpus arm '{index_arm or 'unset'}' but "
+                f"'{expected_corpus_arm}' was expected. The Phase 8 arms share a corpus "
+                "version, so this is the only check that catches the wrong arm."
+            )
+
         index = cls(
             k1=data.get("k1", 1.2),
             b=data.get("b", 0.75),
             corpus_version=data.get("corpus_version", ""),
             index_version=data.get("index_version", "bm25_v1"),
+            corpus_arm=index_arm,
         )
         index.doc_ids = data.get("doc_ids", [])
         index.doc_lengths = data.get("doc_lengths", [])

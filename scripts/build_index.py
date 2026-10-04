@@ -36,8 +36,12 @@ def main() -> int:
     parser.add_argument(
         "--collection",
         type=str,
-        default="adaptiverag_dense_v1",
-        help="Qdrant collection name",
+        default=None,
+        help=(
+            "Qdrant collection name. Defaults to IndexConfig.collection_name, "
+            "which is the namespace the retrieval code reads -- a collection "
+            "named here but not there produces an index nothing queries."
+        ),
     )
     parser.add_argument(
         "--recreate",
@@ -49,7 +53,7 @@ def main() -> int:
     setup_logging()
     logger.info("Initializing Indexing Pipeline (Qdrant vector store)...")
 
-    config = IndexConfig(collection_name=args.collection)
+    config = IndexConfig(collection_name=args.collection or IndexConfig().collection_name)
     pipeline = IndexingPipeline(config=config)
 
     total_upserted = pipeline.build_index_from_artifacts(
@@ -59,7 +63,11 @@ def main() -> int:
     )
 
     logger.info("=" * 60)
-    logger.info("Indexing Summary: Upserted %d points into collection '%s'", total_upserted, args.collection)
+    logger.info(
+        "Indexing Summary: Upserted %d points into collection '%s'",
+        total_upserted,
+        config.collection_name,
+    )
     logger.info("Verified collection count: %d", pipeline.vector_store.count())
     logger.info("=" * 60)
     pipeline.vector_store.close()

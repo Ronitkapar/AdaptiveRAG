@@ -63,6 +63,13 @@ experiments/*/
 data/evaluation/phase7_part_*.jsonl
 data/evaluation/phase7_part_*.ledger.jsonl
 
+# Phase 8 namespace corpora (the column-extraction before/after pair). Derived
+# from the raw PDFs by the ingestion pipeline, so they are reproducible rather
+# than committed; the intent matches `data/processed/*` above. Their exact
+# versions are pinned by hash in docs/phase7-closure-evidence.md.
+data/processed_phase8_before/
+data/processed_phase8_after/
+
 # IDEs & OS
 .vscode/
 .idea/

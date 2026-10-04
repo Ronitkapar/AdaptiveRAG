@@ -686,6 +686,8 @@ committed records carry no `split` key, and the model is `extra="forbid"`.
 ## ADR-028 — Phase 7 Findings: The Rerank Rung Is Net-Negative and the Shipped Gate Cannot Open
 
 Status: RECOMMENDED — NOT IMPLEMENTED
+Revised by Phase 8 (see "Phase 8 revision" at the end): **Finding 1 stands as a
+recommendation but its stated mechanism is withdrawn.**
 
 Phase 7 measured the shipped routing configuration end to end and produced two
 architectural findings. This ADR records them as **recommendations**. Neither has
@@ -708,9 +710,18 @@ ladder terminates on a quality-positive rung.
 
 This is not a reversal of ADR-020. That ADR records reranking as a correct
 *architectural* second stage; this one records that the specific model chosen
-does not pay for itself on this corpus. The defect is the model's domain
-mismatch with column-interleaved PDF-extraction prose, not the composition-layer
-design, and ADR-020's stage boundary stands.
+does not pay for itself on this corpus. ADR-020's stage boundary stands.
+
+**Mechanism caveat, added by Phase 8.** The paragraph above originally attributed
+the reranker's deficit to "the model's domain-mismatch with column-interleaved
+PDF-extraction prose". That attribution is **withdrawn**. Phase 8 fixed the
+interleaving defect, measured it to a standard (§3.3 of `docs/phases/phase-8.md`),
+and re-ran this arm against both corpora: `hybrid_rerank` moved by −0.0016
+Recall@5 (4 wins / 4 losses / 99 ties of 107) and its penalty against `hybrid` did
+not shrink — it grew slightly, on both Recall@5 (−0.1417 → −0.1526, p_adj 0.0139 →
+0.0007) and MRR (−0.2577 → −0.2657). The corpus defect was not the mechanism. What
+survives is an unexplained model/domain mismatch, and the recommendation below now
+rests on the measurement rather than on a cause.
 
 **Finding 2 — the shipped sufficiency threshold sits above the observed score
 range, so escalation cannot fire.** `sufficiency_threshold=0.5` was a reasoned
@@ -734,3 +745,66 @@ retrieved chunk-ids on 104/107 — and pays ~59 ms of median latency for that
 equivalence. "Adaptive routing does not beat a fixed strategy" is therefore an
 artifact of a gate that never opens, not evidence that routing cannot help. Any
 re-evaluation must follow both recommendations, not either one alone.
+
+### Phase 8 revision
+
+Phase 8 re-ran E1–E5 against a corrected corpus, as a before/after study, and this
+ADR's two findings resolve differently than the reasoning above implies.
+
+**Finding 1 — recommendation upheld, cause withdrawn.** Removing the rerank rung is
+still the right call: on the fixed corpus `hybrid_rerank` remains last on every
+quality metric (Recall@5 0.7056, MRR 0.6021) against hybrid's 0.8583 / 0.8678,
+significantly worse on both (p_adj 0.0007 / <0.0001), at 6.2x hybrid's median
+latency (3595.22 ms vs 577.12 ms). But the corpus-extraction attribution is
+**wrong**. Fixing the extraction did not improve the arm at all (−0.0016 Recall@5,
+99 of 107 queries tied), so the extraction defect was never what was suppressing it.
+The paragraph attributing the deficit to column-interleaved prose has been amended
+above accordingly.
+
+This is a stronger position than Phase 7 held, in one narrow sense: the
+recommendation no longer depends on the defect being fixed. It is weaker in
+another: the cause is now unidentified, so "replace the model" is a hypothesis
+rather than a diagnosis.
+
+**Finding 2 — reproduced, and the ladder still never opens.** E4/E5 on the fixed
+corpus reproduce Phase 7: `sufficiency_threshold` 0.3–0.6 and `cost_weight` 0.0–1.0
+are all quality-identical, and escalation remains unobserved. One new datum: on
+the fixed corpus `sufficiency_threshold=0.7` now *costs* quality (Recall@5 0.8830 →
+0.8617) where on the old corpus it was free. The stricter gate escalates more
+often and escalation terminates at the reranker, which is the first place the two
+findings interact. It is a single-arm difference with no paired test, so it is a
+lead, not a finding.
+
+The recommendation stands unchanged: recalibrate the threshold inside the observed
+range (0.6–0.65) and validate on a joint grid with `cost_weight`. It is worth
+noting that removing the rerank rung (Finding 1) would make a mis-set gate far less
+consequential, since the worst available rung would no longer be the one escalation
+lands on. The two recommendations should still be evaluated together.
+
+**Method finding attached to this ADR.** Phase 8's first E1 sweep produced 13 of
+29 arms in which the reranker arm failed on 48 of 107 queries to
+`EmbeddingAPIError`, while every suite reported `ok` and a full trace count and
+`metrics_retrieval.json` reported the arm's Recall@5 as 0.6384 at `n=59` with no
+error field. That figure reads as a +0.067 improvement over the after arm; the
+arm's true value is 0.352 and its clean re-run is 0.7072 — a regression of −0.355.
+Adopting this ADR's Finding 1 on that evidence would have been right by accident.
+`scripts/compare_phase8_arms.py` now refuses an arm whose traces are not all `ok`,
+and **trace status — not `trace_count`, and not a metric's own `n` — is what
+establishes that a measurement covers its query set.**
+
+**Companion finding — latency needs a control arm.** Phase 8's before/after tests
+reported `dense` 411 ms slower (p_adj < 0.001) and `hybrid_rerank` 112 ms slower
+after the corpus fix. Both are provider variance, not corpus effect. The cost
+artifacts' per-stage breakdown shows every stage that could respond to the corpus
+moved ~1% or less (`bm25` search 2.48 → 2.12 ms, rerank ONNX stage +0.5%), while
+the stages that moved materially all sit in the **query-embedding API call** — a
+call that embeds the query, not the index, and so cannot be affected by which text
+is stored. E1's `bm25` arm, which makes no API call at all, moved 1.83 → 1.85 ms.
+Those two latency results are withdrawn (`docs/phase-8-results.md` §6.1).
+
+The rerank rung's own 6.2x cost penalty is unaffected, because the cross-encoder
+stage is local computation: 3061.78 → 3059.48 ms across the fix. **A latency claim
+on this hardware needs a no-API control arm and a stage-level breakdown;
+`total_latency_ms` alone cannot separate provider variance from system cost.** This
+bears on Finding 2 as well — the threshold is mis-set, and the cost table it would be
+recalibrated against carries ±130 ms of provider noise on its API-bound entries.
