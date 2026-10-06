@@ -1,0 +1,103 @@
+{
+  "snapshot_version": "frontend_snapshot_v1",
+  "generated_note": "Curated projection of frozen, already-committed research results (docs/ADAPTIVERAG_REPORT.md, docs/phase_7_results.md, docs/phase-8-results.md, experiments/phase7/analysis/.../e1_main_comparison.json). Committed so the Streamlit demo renders on a fresh clone where the gitignored experiment artifacts are absent. Every value here is a real recorded result, not an estimate.",
+  "benchmark": {
+    "name": "phase7_eval_v1",
+    "queries": 107,
+    "calibration": 47,
+    "test": 60,
+    "description": "Frozen 107-query academic-RAG benchmark; retrieval-only, paired queries."
+  },
+  "phase7_e1": {
+    "title": "Phase 7 E1 — five-arm comparison (107 queries, pre-fix 713-chunk corpus)",
+    "source": "docs/phase_7_results.md §2; experiments/phase7/analysis/e1_e6_e7_e8/tables/e1_main_comparison.json",
+    "note": "Historical record on the pre-fix corpus; Phase 7 closure gates were computed on it.",
+    "columns": ["system", "recall_at_5", "mrr", "hit_at_5", "median_latency_ms", "p95_latency_ms"],
+    "rows": [
+      {"system": "bm25", "recall_at_5": 0.7788, "mrr": 0.7264, "hit_at_5": 0.8318, "median_latency_ms": 1.88, "p95_latency_ms": 3.45},
+      {"system": "dense", "recall_at_5": 0.9283, "mrr": 0.8604, "hit_at_5": 0.9720, "median_latency_ms": 472.84, "p95_latency_ms": 691.20},
+      {"system": "hybrid", "recall_at_5": 0.8723, "mrr": 0.8576, "hit_at_5": 0.9346, "median_latency_ms": 465.65, "p95_latency_ms": 733.62},
+      {"system": "hybrid_rerank", "recall_at_5": 0.7165, "mrr": 0.5851, "hit_at_5": 0.7757, "median_latency_ms": 3491.69, "p95_latency_ms": 3958.55},
+      {"system": "adaptive", "recall_at_5": 0.8723, "mrr": 0.8564, "hit_at_5": 0.9346, "median_latency_ms": 524.85, "p95_latency_ms": 655.41}
+    ]
+  },
+  "phase8_e1": {
+    "title": "Phase 8 E1 — five arms on both corpus arms (107 queries, fixed corpus)",
+    "source": "docs/phase-8-results.md §2.1",
+    "note": "Shipping-corpus record. Quality unchanged by the corpus fix: no quality delta on any arm survives Holm correction.",
+    "columns": ["arm", "recall_before", "recall_after", "mrr_before", "mrr_after", "hit_before", "hit_after"],
+    "rows": [
+      {"arm": "bm25", "recall_before": 0.7757, "recall_after": 0.7866, "mrr_before": 0.7030, "mrr_after": 0.7313, "hit_before": 0.8224, "hit_after": 0.8505},
+      {"arm": "dense", "recall_before": 0.9143, "recall_after": 0.8988, "mrr_before": 0.8714, "mrr_after": 0.8645, "hit_before": 0.9533, "hit_after": 0.9346},
+      {"arm": "hybrid", "recall_before": 0.8489, "recall_after": 0.8583, "mrr_before": 0.8593, "mrr_after": 0.8678, "hit_before": 0.9159, "hit_after": 0.9252},
+      {"arm": "hybrid_rerank", "recall_before": 0.7072, "recall_after": 0.7056, "mrr_before": 0.6016, "mrr_after": 0.6021, "hit_before": 0.7664, "hit_after": 0.7664},
+      {"arm": "adaptive", "recall_before": 0.8489, "recall_after": 0.8583, "mrr_before": 0.8535, "mrr_after": 0.8664, "hit_before": 0.9159, "hit_after": 0.9252}
+    ]
+  },
+  "oracle_ceiling": {
+    "title": "Oracle routing ceiling — is there headroom for routing at all? (Phase 8 §8)",
+    "source": "docs/phase-8-results.md §8.2; experiments/phase8/oracle_ceiling_v2.json",
+    "note": "Oracle = best per-query choice over the four selectable strategies. Best fixed = dense. recall@5, MRR and the gate verdict are unchanged by the v2 correction (adaptive was credited only as ties).",
+    "arm": "after (shipping corpus), n=107",
+    "columns": ["policy", "recall_at_5", "mrr", "hit_at_5", "mean_latency_ms", "median_latency_ms"],
+    "rows": [
+      {"policy": "bm25", "recall_at_5": 0.7866, "mrr": 0.7313, "hit_at_5": 0.8505, "mean_latency_ms": 1.98, "median_latency_ms": 1.85},
+      {"policy": "dense (best fixed)", "recall_at_5": 0.8988, "mrr": 0.8645, "hit_at_5": 0.9346, "mean_latency_ms": 938.46, "median_latency_ms": 632.08},
+      {"policy": "hybrid", "recall_at_5": 0.8583, "mrr": 0.8678, "hit_at_5": 0.9252, "mean_latency_ms": 663.33, "median_latency_ms": 577.12},
+      {"policy": "hybrid_rerank", "recall_at_5": 0.7056, "mrr": 0.6021, "hit_at_5": 0.7664, "mean_latency_ms": 3626.51, "median_latency_ms": 3595.22},
+      {"policy": "adaptive", "recall_at_5": 0.8583, "mrr": 0.8664, "hit_at_5": 0.9252, "mean_latency_ms": 530.91, "median_latency_ms": 479.61},
+      {"policy": "ORACLE (per-query)", "recall_at_5": 0.9206, "mrr": 0.8224, "hit_at_5": 0.9626, "mean_latency_ms": 96.35, "median_latency_ms": 2.03},
+      {"policy": "frontier (eps=0.01)", "recall_at_5": 0.9206, "mrr": 0.8224, "hit_at_5": 0.9626, "mean_latency_ms": 96.35, "median_latency_ms": 2.03}
+    ],
+    "gate": {
+      "verdict": "routing_has_headroom",
+      "quality_headroom_after": 0.0218,
+      "quality_headroom_before": 0.0343,
+      "quality_threshold": 0.02,
+      "latency_branch": "failed (detectability test; no signal separates needed from sufficient)",
+      "frontier_saving_after_ms": -842.11,
+      "frontier_saving_before_ms": -398.21,
+      "caveat": "The +0.0218 ceiling is carried by only 4/107 queries (98 tie at max). The gate verdict should not be read at face value: the gain is real but not reachable by the existing sufficiency mechanism."
+    }
+  },
+  "cheap_first_phase15": {
+    "title": "Phase 15 — powered confirmation of the cheap-first rule (110 fresh queries per arm)",
+    "source": "docs/ADAPTIVERAG_REPORT.md §5.7; docs/phase15_results.md",
+    "note": "The frozen Phase 14 rule (bm25_slope >= -0.915) applied unchanged to 110 fresh queries per arm, all test split, no calibration split.",
+    "columns": ["observation", "after", "before"],
+    "rows": [
+      {"observation": "oracle positives", "after": 14, "before": 11},
+      {"observation": "dense-call rate (CI95)", "after": "0.282 [0.200, 0.373]", "before": "0.318 [0.236, 0.409]"},
+      {"observation": "positives caught", "after": "9 / 14", "before": "9 / 11"},
+      {"observation": "false positives", "after": 22, "before": 26},
+      {"observation": "Recall@5 BM25 / adaptive / Dense", "after": "0.8545 / 0.9129 / 0.9432", "before": "0.8795 / 0.9242 / 0.9424"},
+      {"observation": "delta (adaptive - BM25)", "after": "+0.058 [0.016, 0.107]", "before": "+0.045 [0.004, 0.092]"},
+      {"observation": "delta (adaptive - dense)", "after": "-0.030 [-0.067, 0.000]", "before": "-0.018 [-0.046, 0.000]"},
+      {"observation": "P(random >= adaptive)", "after": 0.008, "before": 0.019}
+    ],
+    "verdict": "INSUFFICIENT EVIDENCE",
+    "verdict_detail": "4 of 5 success bars met (including the powered primary); the dense-margin bar missed by 0.004 (combined adaptive 0.9186 vs combined dense 0.9428, bar = dense - 0.02)."
+  },
+  "corpus": {
+    "papers": 14,
+    "categories": {
+      "foundational_rag": 3,
+      "dense_retrieval": 2,
+      "sparse_retrieval": 2,
+      "hybrid_retrieval": 2,
+      "reranking": 2,
+      "advanced_rag": 2,
+      "adaptive_retrieval": 1
+    },
+    "chunk_counts": {
+      "phase7_before_historical": 713,
+      "phase8_before": 618,
+      "phase8_after_shipping": 613
+    },
+    "known_defects": [
+      "pyserini_lin_2021 contains a biomedical knowledge-graph survey, not the Pyserini toolkit paper (contained by excluding 6 benchmark records).",
+      "Two-column PDF extraction defect interleaved columns; fixed in Phase 8 (before/after study).",
+      "47 of 140 gold section labels are spliced and 40 unresolvable; only 22 safely repairable. nDCG@5 is therefore excluded from all reported quality claims."
+    ]
+  }
+}
