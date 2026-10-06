@@ -3,13 +3,15 @@
 ## Project
 
 AdaptiveRAG is a query-aware RAG system that evaluates retrieval strategies and
-eventually learns to route queries to an appropriate strategy.
+investigates whether retrieval effort can be adapted per query.
 
 Planned progression:
 
 Dense → BM25 → Hybrid → Reranking → Adaptive Routing
 
-The current phase is defined in `docs/progress.md`.
+The research investigation is complete (Phases 1–15) and experimentation has
+been deliberately stopped; see `docs/progress.md` for the final status and
+`docs/ADAPTIVERAG_REPORT.md` for the final research report.
 
 ---
 
@@ -51,18 +53,33 @@ on old conversation context when the repository says otherwise.
 
 ## Phase Boundaries
 
-Only implement functionality belonging to the current phase.
+The research investigation is complete. Do not start new experiments, tune the
+routing policy, or add features beyond maintenance and documentation work
+unless explicitly requested.
 
-Current progression:
+Final progression status:
 
 * Phase 1 — Corpus Foundation: COMPLETE
 * Phase 2 — Dense RAG Baseline: COMPLETE
 * Phase 3 — BM25: COMPLETE
-* Phase 4 — Hybrid: NEXT
-* Phase 5 — Reranking: FUTURE
-* Phase 6 — Adaptive Routing: FUTURE
+* Phase 4 — Hybrid: COMPLETE
+* Phase 5 — Reranking: COMPLETE
+* Phase 6 — Adaptive Routing: COMPLETE
+* Phase 7 — Evaluation & Ablations: COMPLETE (closed by two pre-registered gates)
+* Phase 8 — Corpus Fix Study: COMPLETE (quality study; cost measured, not frozen)
+* Phase 9 — Strategy Sensitivity: COMPLETE (`PROMISING_SIGNAL`)
+* Phase 10 — Post-Dense Escalation: COMPLETE (`FAILURE` — honest negative)
+* Phase 11 — Missing-Signal Analysis: COMPLETE (outcome B: mechanism found,
+  evidence insufficient)
+* Phase 12 — Research Boundary: COMPLETE (recommendation: STOP current
+  adaptive-routing track)
+* Phase 13 — Next Direction: COMPLETE (cheap-first track selected)
+* Phase 14 — Cheap-First Experiment: COMPLETE (`INSUFFICIENT EVIDENCE`)
+* Phase 15 — Powered Confirmation: COMPLETE (`INSUFFICIENT EVIDENCE`, 4/5 bars)
 
-Do not implement future phases unless explicitly requested.
+Status: research investigation completed; adaptive-routing experimentation
+paused; no final optimal routing policy claimed. See
+`docs/ADAPTIVERAG_REPORT.md`.
 
 ---
 

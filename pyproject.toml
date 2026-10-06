@@ -23,6 +23,15 @@ dev = [
     "pytest>=8.0.0",
     "reportlab>=4.0.0",
 ]
+plots = [
+    "matplotlib>=3.8.0",
+]
+# Streamlit demo frontend (frontend/app.py). Deliberately optional: the
+# retrieval/evaluation core has no Streamlit dependency, and the demo is
+# a presentation layer over the frozen artifacts, not a runtime component.
+frontend = [
+    "streamlit>=1.30.0",
+]
 
 [build-system]
 requires = ["hatchling"]
@@ -40,4 +49,3 @@ markers = [
     "integration: tests requiring live API keys or prebuilt artifacts (deselected by default)",
 ]
 addopts = "-m 'not integration'"
-

@@ -563,14 +563,14 @@ def test_runner_records_constituent_failure_without_fallback(tmp_path: Path):
 
 
 def _canonical_corpus_files():
-    from adaptive_rag.config.paths import CHUNKS_DIR
+    from adaptive_rag.config.paths import BM25_INDEX_PATH
 
-    return sorted(CHUNKS_DIR.glob("*.chunks.jsonl"))
+    return BM25_INDEX_PATH.is_file()
 
 
 @pytest.mark.skipif(
     not _canonical_corpus_files(),
-    reason="canonical chunk corpus not present (gitignored artifacts)",
+    reason="canonical BM25 index not present (gitignored artifact)",
 )
 def test_regression_hybrid_on_canonical_corpus():
     """Known keywords surface the expected documents after fusion.
@@ -579,21 +579,24 @@ def test_regression_hybrid_on_canonical_corpus():
     signal unrelated to the query terms); the lexical branch is the real
     BM25Retriever over the canonical corpus. The fused list must beat both
     branches rather than reproducing either one.
+
+    Both branches read the **built index**, not `data/processed/chunks`. The chunk
+    files on disk are a later rebuild that chunking the current documents does not
+    reproduce, so they no longer describe the indexed corpus; the index carries the
+    chunk ids and texts this test needs and is the artifact both retrievers serve.
     """
-    from adaptive_rag.config.paths import CHUNKS_DIR
-    from adaptive_rag.experiments.config import compute_corpus_version
-    from scripts.build_bm25_index import load_canonical_chunks
+    from adaptive_rag.config.paths import BM25_INDEX_PATH
 
-    chunks = load_canonical_chunks(CHUNKS_DIR)
-    assert len(chunks) > 0
+    index = BM25Index.load(BM25_INDEX_PATH)
+    chunk_ids = list(index.doc_ids)
+    assert chunk_ids, "canonical BM25 index is empty"
 
-    corpus_ver = compute_corpus_version()
-    index = BM25Index(corpus_version=corpus_ver)
-    index.build_from_chunks(chunks, corpus_version=corpus_ver)
+    corpus_ver = index.corpus_version
     lexical = BM25Retriever(index=index, corpus_version=corpus_ver)
     retriever_config = RetrievalConfig(retrieval_method="hybrid", top_k=10, candidate_k=20)
 
-    size_ranked = _ranked([c.chunk_id for c in sorted(chunks, key=lambda c: -len(c.text))[:20]])
+    longest = sorted(zip(chunk_ids, index.doc_texts), key=lambda pair: -len(pair[1]))
+    size_ranked = _ranked([cid for cid, _ in longest[:20]])
     dense = StubRetriever("dense", size_ranked)
     hybrid = HybridRetriever(
         dense_retriever=dense,

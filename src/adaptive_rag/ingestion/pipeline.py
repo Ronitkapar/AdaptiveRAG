@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from adaptive_rag.config.hashing import canonical_json, compute_file_sha256
-from adaptive_rag.config.paths import DOCUMENTS_DIR, PAPERS_MANIFEST_PATH, PROCESSED_DATA_DIR
+from adaptive_rag.config.paths import DOCUMENTS_DIR, PAPERS_MANIFEST_PATH
 from adaptive_rag.errors import CorpusIntegrityError, PdfExtractionError
 from adaptive_rag.ingestion.extractor import PdfplumberExtractor
 from adaptive_rag.ingestion.normalizer import normalize_pages_to_document
@@ -99,8 +99,12 @@ class IngestionPipeline:
                 "issue_count": len(doc.extraction_report.issues),
             })
 
-        # Save documents manifest summary
-        manifest_summary_path = PROCESSED_DATA_DIR / "documents_manifest.json"
+        # The summary is written beside the documents it describes, not to a fixed
+        # location. Phase 8 ingests into its own directory while the Phase 7
+        # artifacts stay in place as the study's "before" arm, and a summary
+        # describing one corpus must not overwrite the other's.
+        manifest_summary_path = out_dir.parent / "documents_manifest.json"
+        manifest_summary_path.parent.mkdir(parents=True, exist_ok=True)
         manifest_summary_path.write_text(
             canonical_json({
                 "ingestion_version": self.config.ingestion_version,

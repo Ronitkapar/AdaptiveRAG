@@ -49,6 +49,14 @@ class AICreditsEmbeddingModel:
                 base_url=self.settings.AICREDITS_BASE_URL,
                 api_key=api_key,
                 timeout=45.0,
+                # `max_retries=0` disables the SDK's own retry layer
+                # (`openai._constants.DEFAULT_MAX_RETRIES = 2`), which silently
+                # re-issues a timed-out request *inside* a single call. With it
+                # on, one stalled request cost 3 x 45s + backoff ~= 136s of
+                # complete silence, on top of the explicit `max_retries` loop in
+                # `_embed_batch`, which already owns backoff and 429/5xx
+                # handling. Do not re-add it.
+                max_retries=0,
             )
         return self._client
 
@@ -79,6 +87,16 @@ class AICreditsEmbeddingModel:
             except Exception as exc:
                 exc_str = str(exc).lower()
                 status = getattr(exc, "status_code", None)
+                # Classify by type, never by message text. The SDK renders a
+                # timeout as "Request timed out." and a dropped connection as
+                # "Connection error.", so the old `"timeout" in str(exc)` test
+                # matched neither and let every timeout escape unretried on
+                # attempt 1 as a plain EmbeddingAPIError. Imported locally to
+                # keep this module importable without the SDK, as in
+                # `_get_client`.
+                from openai import APITimeoutError
+
+                is_timeout = isinstance(exc, APITimeoutError)
 
                 # Batch size cap check (413 or 400 payload too large)
                 if (status == 413 or (status == 400 and any(h in exc_str for h in ("batch", "too many", "maximum", "array", "input")))) and len(batch) > 1:
@@ -86,12 +104,12 @@ class AICreditsEmbeddingModel:
                     return self._embed_batch(batch[:mid]) + self._embed_batch(batch[mid:])
 
                 # Retryable status
-                if (status in (429, 500, 502, 503, 504) or "rate limit" in exc_str or "timeout" in exc_str) and attempt < self.config.max_retries:
+                if (status in (429, 500, 502, 503, 504) or "rate limit" in exc_str or is_timeout) and attempt < self.config.max_retries:
                     wait_sec = 2 ** attempt
                     time.sleep(wait_sec)
                     continue
 
-                if "timeout" in exc_str:
+                if is_timeout:
                     raise EmbeddingTimeoutError(f"Embedding request timed out: {exc}") from exc
 
                 raise EmbeddingAPIError(

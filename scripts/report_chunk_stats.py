@@ -13,7 +13,13 @@ from adaptive_rag.config.paths import CHUNKS_DIR, STATS_DIR
 
 
 def main() -> int:
-    stats_file = STATS_DIR / "chunk_stats.json"
+    # The chunking pipeline writes the stats file beside the chunks it
+    # describes (`out_dir.parent / "chunk_stats.json"`), so read it from the
+    # same location. The pre-Phase-8 fixed `STATS_DIR` copy is kept only as a
+    # fallback for older layouts.
+    stats_file = CHUNKS_DIR.parent / "chunk_stats.json"
+    if not stats_file.is_file():
+        stats_file = STATS_DIR / "chunk_stats.json"
     if not stats_file.is_file():
         print("No chunk stats found. Run scripts/build_chunks.py first.", file=sys.stderr)
         return 1

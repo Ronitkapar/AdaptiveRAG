@@ -251,27 +251,34 @@ def test_build_experiment_config_stamps_consistent_versions():
 
 
 def _canonical_corpus_files():
-    from adaptive_rag.config.paths import CHUNKS_DIR
+    from adaptive_rag.config.paths import BM25_INDEX_PATH
 
-    return sorted(CHUNKS_DIR.glob("*.chunks.jsonl"))
+    return BM25_INDEX_PATH.is_file()
 
 
 @pytest.mark.skipif(
     not _canonical_corpus_files(),
-    reason="canonical chunk corpus not present (gitignored artifacts)",
+    reason="canonical BM25 index not present (gitignored artifact)",
 )
 def test_regression_lexical_keywords_on_canonical_corpus():
-    """Known lexical keywords must surface the expected documents at top ranks."""
-    from adaptive_rag.config.paths import CHUNKS_DIR
-    from adaptive_rag.experiments.config import compute_corpus_version
-    from scripts.build_bm25_index import load_canonical_chunks
+    """Known lexical keywords must surface the expected documents at top ranks.
 
-    chunks = load_canonical_chunks(CHUNKS_DIR)
-    assert len(chunks) > 0
+    Asserted against the **built index**, not against a freshly-indexed copy of
+    `data/processed/chunks`. Those two have drifted apart -- the chunk files on
+    disk are a later rebuild that chunking the current documents does not
+    reproduce, so they no longer describe the corpus that was indexed -- and only
+    the index is what BM25 retrieval actually reads. Building a throwaway index
+    from the chunk files would have tested an artifact nothing serves while
+    looking like it tested the real one.
 
-    corpus_ver = compute_corpus_version()
-    index = BM25Index(corpus_version=corpus_ver)
-    index.build_from_chunks(chunks, corpus_version=corpus_ver)
+    Rebuild the index with `scripts/build_bm25_index.py` after any re-chunking;
+    `tests/test_phase8_corpus_namespace.py` covers that the index and the corpus
+    version agree.
+    """
+    from adaptive_rag.config.paths import BM25_INDEX_PATH
+
+    index = BM25Index.load(BM25_INDEX_PATH)
+    assert index.doc_ids, "canonical BM25 index is empty"
 
     for keyword, expected_doc in (
         ("Robertson", "bm25_robertson_2009"),

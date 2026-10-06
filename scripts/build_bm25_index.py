@@ -16,7 +16,7 @@ from adaptive_rag.config.logging import setup_logging
 from adaptive_rag.config.paths import BM25_INDEX_PATH, CHUNKS_DIR
 from adaptive_rag.experiments.config import compute_corpus_version
 from adaptive_rag.indexing.bm25 import BM25Index
-from adaptive_rag.schemas import Chunk
+from adaptive_rag.schemas import Chunk, IndexConfig
 
 logger = logging.getLogger("build_bm25_index")
 
@@ -59,6 +59,17 @@ def main() -> int:
         default=0.75,
         help="BM25 b parameter (document length normalization)",
     )
+    parser.add_argument(
+        "--corpus-arm",
+        type=str,
+        default=IndexConfig().corpus_arm,
+        help=(
+            "Corpus arm recorded in the index and checked on load. The Phase 8 "
+            "arms share a corpus version, so this is the only thing that "
+            "distinguishes an index built from the before arm from one built "
+            "from the after arm."
+        ),
+    )
     args = parser.parse_args()
 
     setup_logging()
@@ -69,11 +80,18 @@ def main() -> int:
         return 1
 
     corpus_ver = compute_corpus_version()
-    logger.info("Found %d chunks across canonical corpus (corpus_version=%s)", len(chunks), corpus_ver)
+    logger.info(
+        "Found %d chunks across canonical corpus (corpus_version=%s, arm=%s)",
+        len(chunks), corpus_ver, args.corpus_arm,
+    )
     logger.info("Building BM25Index (k1=%.2f, b=%.2f)...", args.k1, args.b)
 
-    index = BM25Index(k1=args.k1, b=args.b, corpus_version=corpus_ver)
-    total_docs = index.build_from_chunks(chunks, corpus_version=corpus_ver)
+    index = BM25Index(
+        k1=args.k1, b=args.b, corpus_version=corpus_ver, corpus_arm=args.corpus_arm
+    )
+    total_docs = index.build_from_chunks(
+        chunks, corpus_version=corpus_ver, corpus_arm=args.corpus_arm
+    )
 
     logger.info("Saving BM25 index to %s...", args.output_path)
     index.save(args.output_path)

@@ -10,7 +10,7 @@ from pathlib import Path
 
 from adaptive_rag.chunking.structure_aware import StructureAwareChunker
 from adaptive_rag.config.hashing import canonical_json
-from adaptive_rag.config.paths import CHUNKS_DIR, DOCUMENTS_DIR, PROCESSED_DATA_DIR, STATS_DIR
+from adaptive_rag.config.paths import CHUNKS_DIR, DOCUMENTS_DIR
 from adaptive_rag.schemas import Chunk, ChunkingConfig, Document
 
 
@@ -66,8 +66,11 @@ class ChunkingPipeline:
                 "avg_tokens": round(sum(tokens) / len(chunks), 1) if chunks else 0,
             })
 
-        # Save manifest
-        manifest_path = PROCESSED_DATA_DIR / "chunks_manifest.json"
+        # Beside the chunks it describes, not at a fixed location: Phase 8 chunks into
+        # its own directory while Phase 7's artifacts stay in place as the study's
+        # "before" arm, and one corpus's manifest must not overwrite the other's.
+        manifest_path = out_dir.parent / "chunks_manifest.json"
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
         manifest_path.write_text(
             canonical_json({
                 "chunking_version": self.config.chunking_version,
@@ -79,9 +82,8 @@ class ChunkingPipeline:
             encoding="utf-8",
         )
 
-        # Save stats
-        STATS_DIR.mkdir(parents=True, exist_ok=True)
-        stats_path = STATS_DIR / "chunk_stats.json"
+        # Stats beside the chunks too, for the same reason as the manifest above.
+        stats_path = out_dir.parent / "chunk_stats.json"
         if all_token_counts:
             sorted_t = sorted(all_token_counts)
             stats_path.write_text(

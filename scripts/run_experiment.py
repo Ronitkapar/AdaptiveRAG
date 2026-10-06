@@ -19,6 +19,7 @@ from adaptive_rag.evaluation import (
     GenerationEvaluator,
     GroqLLMJudge,
     RetrievalEvaluator,
+    RoutingEvaluator,
     load_evaluation_dataset,
 )
 from adaptive_rag.experiments import (
@@ -38,6 +39,7 @@ DEFAULT_RUN_NAMES = {
     "dense_rerank": "dense_rerank_v1",
     "bm25_rerank": "bm25_rerank_v1",
     "hybrid_rerank": "hybrid_rerank_v1",
+    "adaptive": "adaptive_baseline_v1",
 }
 
 
@@ -46,7 +48,7 @@ def main() -> int:
     parser.add_argument(
         "--retriever",
         type=str,
-        choices=["dense", "bm25", "hybrid"],
+        choices=["dense", "bm25", "hybrid", "adaptive"],
         default="dense",
         help="Retrieval strategy to evaluate",
     )
@@ -137,7 +139,69 @@ def main() -> int:
         help="Return un-reranked candidates when the reranker fails (opt-in, "
         "visible as rerank_fallback in every trace)",
     )
+
+    # --- Phase 6 adaptive routing flags -------------------------------------
+    parser.add_argument(
+        "--routing-strategies",
+        type=str,
+        default=None,
+        help="Comma-separated strategies the adaptive router may select "
+        "(default bm25,dense,hybrid,hybrid_rerank). Restricting this also "
+        "restricts which indexes are built, so a BM25-only run needs no vector store",
+    )
+    parser.add_argument(
+        "--routing-ladder",
+        type=str,
+        default=None,
+        help="Comma-separated escalation ladder, weakest first "
+        "(default bm25,dense,hybrid,hybrid_rerank)",
+    )
+    parser.add_argument(
+        "--no-escalation",
+        action="store_true",
+        help="Route once and never escalate (ablation baseline)",
+    )
+    parser.add_argument(
+        "--no-sufficiency",
+        action="store_true",
+        help="Skip the retrieval-sufficiency check entirely (ablation baseline)",
+    )
+    parser.add_argument(
+        "--routing-cost-weight",
+        type=float,
+        default=None,
+        help="Quality-vs-cost trade-off: 0.0 is pure evidence, higher values "
+        "penalize costlier strategies more (default 0.25)",
+    )
+    parser.add_argument(
+        "--sufficiency-threshold",
+        type=float,
+        default=None,
+        help="Sufficiency score above which retrieval is accepted (default 0.5)",
+    )
+    parser.add_argument(
+        "--disable-feature-group",
+        action="append",
+        default=None,
+        choices=["lexical", "semantic", "entity", "complexity", "question_type", "multi_concept"],
+        help="Remove one routing signal group; repeatable (signal ablation)",
+    )
+    parser.add_argument(
+        "--max-escalation-steps",
+        type=int,
+        default=None,
+        help="Upper bound on escalations per query (default 1)",
+    )
     args = parser.parse_args()
+
+    # Reranking is a *routing* decision under Phase 6, not a fixed flag: the router
+    # selects `hybrid_rerank` only when the evidence supports it. Combining the two
+    # would silently override the router, so it is rejected rather than ignored.
+    if args.retriever == "adaptive" and args.rerank:
+        parser.error(
+            "--rerank cannot be combined with --retriever adaptive: second-stage "
+            "scoring is one of the strategies the adaptive router selects"
+        )
 
     setup_logging()
     logger.info("Loading evaluation dataset from %s", args.dataset)
@@ -150,7 +214,49 @@ def main() -> int:
 
         evaluation_kwargs["evaluation"] = EvaluationConfig(enable_llm_judge=False)
 
-    from adaptive_rag.schemas import RetrievalConfig
+    from adaptive_rag.schemas import RetrievalConfig, RoutingConfig
+
+    routing_fields: dict = {}
+    if args.routing_strategies is not None:
+        routing_fields["available_strategies"] = [
+            s.strip() for s in args.routing_strategies.split(",") if s.strip()
+        ]
+    if args.routing_ladder is not None:
+        routing_fields["escalation_ladder"] = [
+            s.strip() for s in args.routing_ladder.split(",") if s.strip()
+        ]
+    if args.no_escalation:
+        routing_fields["escalation_enabled"] = False
+    if args.no_sufficiency:
+        routing_fields["sufficiency_enabled"] = False
+    if args.routing_cost_weight is not None:
+        routing_fields["cost_weight"] = args.routing_cost_weight
+    if args.sufficiency_threshold is not None:
+        routing_fields["sufficiency_threshold"] = args.sufficiency_threshold
+    if args.disable_feature_group:
+        from adaptive_rag.schemas import FEATURE_GROUPS
+
+        routing_fields["enabled_feature_groups"] = [
+            g for g in FEATURE_GROUPS if g not in set(args.disable_feature_group)
+        ]
+    if args.max_escalation_steps is not None:
+        routing_fields["max_escalation_steps"] = args.max_escalation_steps
+
+    # When the strategy set is narrowed but no ladder is given explicitly, the
+    # ladder must narrow with it. The config validator rejects a ladder naming an
+    # unavailable strategy, and that check is correct: a rung the router could
+    # never execute would be a promise the pipeline cannot keep. Narrowing here
+    # keeps the default ladder consistent with --routing-strategies.
+    if routing_fields.get("available_strategies") is not None and (
+        routing_fields.get("escalation_ladder") is None
+    ):
+        routing_fields["escalation_ladder"] = list(routing_fields["available_strategies"])
+    if "escalation_ladder" in routing_fields and "max_escalation_steps" not in routing_fields:
+        # A one-rung ladder has nowhere to escalate to, so the step bound must drop
+        # with it rather than silently keeping a now-unreachable bound of 1.
+        routing_fields["max_escalation_steps"] = max(
+            0, len(routing_fields["escalation_ladder"]) - 1
+        )
 
     method = f"{args.retriever}_rerank" if args.rerank else args.retriever
     retrieval_fields: dict = {"retrieval_method": method}
@@ -175,6 +281,12 @@ def main() -> int:
         if args.rerank_fallback:
             retrieval_fields["rerank_fallback"] = True
     retrieval_kwargs: dict = {"retrieval": RetrievalConfig(**retrieval_fields)}
+    if method == "adaptive":
+        try:
+            routing_kwargs: dict = {"routing": RoutingConfig(**routing_fields)}
+        except Exception as exc:
+            logger.error("Invalid routing configuration: %s", exc)
+            return 2
 
     default_name = DEFAULT_RUN_NAMES[method]
     # Historical default was "dense_baseline_v1"; keep the remap so a dense-named
@@ -187,7 +299,7 @@ def main() -> int:
     )
 
     config = build_experiment_config(
-        name=experiment_name, **evaluation_kwargs, **retrieval_kwargs
+        name=experiment_name, **evaluation_kwargs, **retrieval_kwargs, **routing_kwargs
     )
     if args.no_judge is False and args.judge_model != config.evaluation.judge_model:
         config = config.model_copy(
@@ -221,39 +333,68 @@ def main() -> int:
         return 2
 
     method = config.retrieval.retrieval_method
-    is_bm25 = method in ("bm25", "bm25_rerank")
-    # Hybrid returns the dense vector store in this slot; its BM25 index is held
-    # by the composed retriever, so both sides are checked explicitly. With
-    # reranking on, the composite sits one level deeper behind the wrapper.
-    base_retriever = getattr(retriever, "base_retriever", retriever)
-    doc_count = index_or_store.total_docs if is_bm25 else index_or_store.count()
-    if doc_count == 0:
-        if is_bm25:
-            logger.error(
-                "BM25 index is empty. Run scripts/build_bm25_index.py first.",
+
+    if method == "adaptive":
+        # The adaptive retriever composes several retrievers; check each one that
+        # its index is populated, naming the strategy that is actually missing so
+        # the failure is actionable instead of generic.
+        for strategy, sub in retriever.retrievers.items():
+            count = (
+                sub.index.total_docs
+                if getattr(sub, "method", "") == "bm25"
+                else sub.vector_store.count()
             )
-        else:
-            logger.error(
-                "Vector store collection '%s' is empty. Run scripts/build_index.py first.",
-                config.index.collection_name,
-            )
-        return 1
-    if method in ("hybrid", "hybrid_rerank"):
-        if base_retriever.bm25_retriever.index.total_docs == 0:
-            logger.error(
-                "Hybrid retrieval needs both indexes, but the BM25 index is empty. "
-                "Run scripts/build_bm25_index.py first."
-            )
-            return 1
+            if count == 0:
+                logger.error(
+                    "Strategy '%s' is available to the adaptive router but its index "
+                    "is empty. Run scripts/build_bm25_index.py and/or "
+                    "scripts/build_index.py first, or narrow --routing-strategies.",
+                    strategy,
+                )
+                return 1
         logger.info(
-            "Hybrid retrieval active: dense collection '%s' (%d points) + BM25 index "
-            "(%d docs), rrf_k=%d candidate_k=%d",
-            config.index.collection_name,
-            doc_count,
-            base_retriever.bm25_retriever.index.total_docs,
-            config.retrieval.rrf_k,
-            config.retrieval.candidate_k,
+            "Adaptive routing active: strategies=%s ladder=%s cost_weight=%.3f "
+            "sufficiency=%s escalation=%s",
+            config.routing.available_strategies,
+            config.routing.escalation_ladder,
+            config.routing.cost_weight,
+            config.routing.sufficiency_enabled,
+            config.routing.escalation_enabled,
         )
+    else:
+        is_bm25 = method in ("bm25", "bm25_rerank")
+        # Hybrid returns the dense vector store in this slot; its BM25 index is held
+        # by the composed retriever, so both sides are checked explicitly. With
+        # reranking on, the composite sits one level deeper behind the wrapper.
+        base_retriever = getattr(retriever, "base_retriever", retriever)
+        doc_count = index_or_store.total_docs if is_bm25 else index_or_store.count()
+        if doc_count == 0:
+            if is_bm25:
+                logger.error(
+                    "BM25 index is empty. Run scripts/build_bm25_index.py first.",
+                )
+            else:
+                logger.error(
+                    "Vector store collection '%s' is empty. Run scripts/build_index.py first.",
+                    config.index.collection_name,
+                )
+            return 1
+        if method in ("hybrid", "hybrid_rerank"):
+            if base_retriever.bm25_retriever.index.total_docs == 0:
+                logger.error(
+                    "Hybrid retrieval needs both indexes, but the BM25 index is empty. "
+                    "Run scripts/build_bm25_index.py first."
+                )
+                return 1
+            logger.info(
+                "Hybrid retrieval active: dense collection '%s' (%d points) + BM25 index "
+                "(%d docs), rrf_k=%d candidate_k=%d",
+                config.index.collection_name,
+                doc_count,
+                base_retriever.bm25_retriever.index.total_docs,
+                config.retrieval.rrf_k,
+                config.retrieval.candidate_k,
+            )
 
     if config.retrieval.rerank_enabled:
         logger.info(
@@ -274,6 +415,7 @@ def main() -> int:
         context_builder=context_builder,
         evaluators=[
             RetrievalEvaluator(),
+            RoutingEvaluator(),
             GenerationEvaluator(
                 judge=None
                 if (args.no_judge or args.no_generation)
