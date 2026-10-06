@@ -8,6 +8,8 @@ Leaf models with no downstream dependencies to avoid circular imports.
 from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from adaptive_rag.schemas.routing import STRATEGY_ORDER, StrategyName
+
 
 class IngestionConfig(BaseModel):
     """Configuration for PDF extraction and document ingestion."""
@@ -15,7 +17,7 @@ class IngestionConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     extractor_backend: Literal["pdfplumber"] = "pdfplumber"
-    ingestion_version: str = "ingestion_v2"
+    ingestion_version: str = "ingestion_v3"
     min_page_chars_warning: int = 100
     extract_tables: bool = True
     extract_figures: bool = True
@@ -56,10 +58,71 @@ class IndexConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    index_version: str = "index_v1"
-    collection_name: str = "adaptiverag_dense_v1"
+    index_version: str = "index_v2"
+    # Which Phase 8 corpus arm this experiment reads. The arms differ only in
+    # whether two-column reading order was handled correctly, so naming the arm is
+    # the whole of what distinguishes one Phase 8 run from the other -- and getting
+    # it wrong would silently compare a corpus with itself.
+    #
+    # "phase7" is the historical namespace: the `adaptiverag_dense_v1` collection
+    # and `storage/bm25/bm25_index.json` that Phase 7 actually evaluated (713
+    # chunks). It is kept loadable as the record of that study, and is NOT a valid
+    # Phase 8 arm -- see `docs/phases/phase-8.md` section 4.
+    corpus_arm: Literal["phase7", "phase8_before", "phase8_after"] = "phase8_after"
+    # Distinct collections, never a rebuild. `ensure_collection` reuses an existing
+    # collection of the same name unless `recreate=True`, so sharing a name across
+    # arms would leave each arm's retired chunk ids in the other's index and every
+    # dense retrieval would return vectors for chunks that no longer exist.
+    collection_name: str = "adaptiverag_dense_v2_after"
+    # Likewise for the lexical index: one file per arm, and pointing this at the
+    # wrong one is caught by the corpus-version guard on load.
+    bm25_index_path: str = "storage/bm25/bm25_index_phase8_after.json"
     distance: Literal["cosine", "dot", "euclidean"] = "cosine"
     batch_size: int = 128
+
+    @model_validator(mode="after")
+    def _namespace_follows_arm(self) -> "IndexConfig":
+        """Derive the collection and lexical index from the arm.
+
+        Without this, `corpus_arm` would be documentation rather than behaviour: a
+        caller selecting an arm could still point at another arm's collection and
+        lexical index, and the run would quietly compare the wrong corpus with
+        itself. Explicit values are honoured so a one-off namespace stays possible,
+        but a silent arm/index mismatch is not.
+
+        The corpus-version guard on the lexical index catches half of this mistake
+        on its own; nothing catches a wrong *collection*, because a collection
+        carries no corpus version.
+        """
+        expected = PHASE8_INDEX_NAMESPACES[self.corpus_arm]
+        updates = {}
+        if self.collection_name == IndexConfig.model_fields["collection_name"].default:
+            updates["collection_name"] = expected["collection_name"]
+        if self.bm25_index_path == IndexConfig.model_fields["bm25_index_path"].default:
+            updates["bm25_index_path"] = expected["bm25_index_path"]
+        for field, value in updates.items():
+            setattr(self, field, value)
+        return self
+
+
+# Every Phase 8 corpus arm's index namespace. Kept beside `IndexConfig` so the
+# mapping from arm to storage is stated once: a run that selects an arm must select
+# its collection and its lexical index together, and two hand-maintained lists would
+# eventually disagree.
+PHASE8_INDEX_NAMESPACES: dict[str, dict[str, str]] = {
+    "phase7": {
+        "collection_name": "adaptiverag_dense_v1",
+        "bm25_index_path": "storage/bm25/bm25_index.json",
+    },
+    "phase8_before": {
+        "collection_name": "adaptiverag_dense_v2_before",
+        "bm25_index_path": "storage/bm25/bm25_index_phase8_before.json",
+    },
+    "phase8_after": {
+        "collection_name": "adaptiverag_dense_v2_after",
+        "bm25_index_path": "storage/bm25/bm25_index_phase8_after.json",
+    },
+}
 
 
 class DenseRetrievalConfig(BaseModel):
@@ -118,8 +181,25 @@ class RerankerConfig(BaseModel):
     fallback_to_retrieval: bool = False
 
 
+# Fixed pipeline order lives in schemas/routing.py and is imported above; it is used
+# here to break score ties deterministically and to order strategy distributions in
+# reports, never to infer capability.
+
+# The six query-characteristic groups the rule-based router scores. Each is a
+# normalized [0, 1] signal derived from QueryFeatures, and each can be switched
+# off independently to measure how much it actually contributes.
+FEATURE_GROUPS: tuple[str, ...] = (
+    "lexical",
+    "semantic",
+    "entity",
+    "complexity",
+    "question_type",
+    "multi_concept",
+)
+
+
 class RetrievalConfig(BaseModel):
-    """Configuration for retrieval (dense, bm25, hybrid, or a reranked variant)."""
+    """Configuration for retrieval (dense, bm25, hybrid, a reranked variant, or adaptive)."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -131,6 +211,7 @@ class RetrievalConfig(BaseModel):
         "dense_rerank",
         "bm25_rerank",
         "hybrid_rerank",
+        "adaptive",
     ] = "dense"
     top_k: int = 10
     score_threshold: float | None = None
@@ -160,6 +241,7 @@ class RetrievalConfig(BaseModel):
             "dense_rerank": "dense_rerank_v1",
             "bm25_rerank": "bm25_rerank_v1",
             "hybrid_rerank": "hybrid_rerank_v1",
+            "adaptive": "adaptive_v1",
         }
         if self.retriever_version in default_version.values():
             # Auto-align a default strategy version to the active retrieval method
@@ -177,6 +259,176 @@ class RetrievalConfig(BaseModel):
                 raise ValueError(
                     "hybrid_rerank candidate_k must be >= rerank_candidate_k"
                 )
+        return self
+
+
+class RoutingConfig(BaseModel):
+    """Configuration for Phase 6 adaptive routing.
+
+    Holds the rule-based router's weighted evidence table, the measured retrieval
+    cost table, the retrieval-sufficiency thresholds, and the bounded escalation
+    ladder. Everything that changes a routing outcome lives here, so it is
+    captured by `config_hash` and a run is reproducible from its recorded
+    `config.json` alone.
+
+    The cost table is seeded from retrieval latencies actually measured in Phase 5
+    (docs/phases/phase-5.md §8, retrieval-only, 20-example benchmark). It is a
+    default to be re-measured, not a theoretical constant: Phase 5 already recorded
+    a documented cost estimate that was wrong by two orders of magnitude.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    router_version: str = "rule_based_v1"
+    analyzer_version: str = "analyzer_v1"
+    sufficiency_version: str = "sufficiency_v1"
+    escalation_version: str = "escalation_v1"
+
+    # Strategies the router may select. Restricting this is also how a BM25-only
+    # adaptive run stays fully offline: the dense branch is then never built.
+    available_strategies: list[StrategyName] = Field(
+        default_factory=lambda: ["bm25", "dense", "hybrid", "hybrid_rerank"]
+    )
+
+    # Weighted evidence table: strategy -> signal group -> weight. Weights may be
+    # negative, which is how a signal arguing *against* a strategy (semantic
+    # phrasing for BM25, say) is expressed.
+    rule_weights: dict[str, dict[str, float]] = Field(default_factory=lambda: {
+        "bm25": {
+            "lexical": 1.0,
+            "entity": 1.5,
+            "question_type": 0.8,
+            "semantic": -0.6,
+            "complexity": -0.8,
+            "multi_concept": -1.0,
+        },
+        "dense": {
+            "lexical": -0.3,
+            "entity": 0.2,
+            "question_type": 0.6,
+            "semantic": 1.5,
+            "complexity": 0.3,
+            "multi_concept": 0.2,
+        },
+        "hybrid": {
+            "lexical": 0.5,
+            "entity": 0.3,
+            "question_type": 0.5,
+            "semantic": 1.0,
+            "complexity": 1.0,
+            "multi_concept": 1.5,
+        },
+        "hybrid_rerank": {
+            "lexical": 0.0,
+            "entity": 0.0,
+            "question_type": 0.5,
+            "semantic": 0.3,
+            "complexity": 1.5,
+            "multi_concept": 1.0,
+        },
+    })
+
+    # Signal groups consulted when scoring. Removing groups is the Phase 6
+    # signal-ablation lever; it is configuration, not a code change.
+    enabled_feature_groups: list[str] = Field(
+        default_factory=lambda: list(FEATURE_GROUPS)
+    )
+
+    # Empirically measured retrieval latency per strategy, in milliseconds.
+    #
+    # Re-measured in Phase 7 under the protocol in `evaluation/measurement.py`:
+    # medians over 5 repetitions x 20 queries (n=100 per arm), 5 warm-up queries
+    # discarded, arm order and query order rotated between repetitions. Provenance
+    # is recorded in `experiments/phase7/strategy_cost_ms.json`.
+    #
+    # These replaced a Phase 5 seed taken from single-pass per-query means with no
+    # warm-up, which encoded a dense/hybrid gap narrower than this hardware's
+    # own run-to-run spread.
+    #
+    # Read `stage_median_ms` in that artifact before trusting these as pure
+    # retrieval cost: for dense, ~426 ms of the ~452 ms median is the live
+    # `text-embedding-3-large` call and only ~24 ms is the vector search. The
+    # router consumes the ratios between these numbers, so a provider outage or
+    # a faster provider changes the table's meaning.
+    strategy_cost_ms: dict[str, float] = Field(default_factory=lambda: {
+        "bm25": 2.25,
+        "dense": 451.78,
+        "hybrid": 455.97,
+        "hybrid_rerank": 3854.41,
+    })
+
+    # Quality-vs-cost trade-off knob. 0.0 is pure evidence; higher values subtract
+    # `cost_weight * cost(strategy) / max_cost` from a strategy's score, so the
+    # router only spends more when the evidence supports spending more.
+    cost_weight: float = 0.25
+
+    candidate_k: int = 20
+
+    # Retrieval-sufficiency check (query time, label free).
+    sufficiency_enabled: bool = True
+    sufficiency_threshold: float = 0.5
+    min_results: int = 3
+    coverage_threshold: float = 0.5
+    top1_coverage_threshold: float = 0.3
+    # Off by default: BM25 magnitudes, cosine similarity, RRF scores, and cross-
+    # encoder logits are not comparable, so one floor would be an invented number.
+    # Kept configurable because a per-strategy floor is legitimate once measured.
+    score_floor: dict[str, float] | None = None
+
+    # Bounded escalation.
+    escalation_enabled: bool = True
+    escalation_ladder: list[StrategyName] = Field(
+        default_factory=lambda: ["bm25", "dense", "hybrid", "hybrid_rerank"]
+    )
+    max_escalation_steps: int = 1
+
+    @model_validator(mode="after")
+    def validate_routing_policy(self) -> "RoutingConfig":
+        named = (
+            set(self.rule_weights)
+            | set(self.strategy_cost_ms)
+            | set(self.escalation_ladder)
+            | set(self.available_strategies)
+        )
+        unknown = named - set(STRATEGY_ORDER)
+        if unknown:
+            raise ValueError(f"unknown retrieval strategy in routing config: {sorted(unknown)}")
+
+        if not self.available_strategies:
+            raise ValueError("available_strategies must not be empty")
+        if len(set(self.available_strategies)) != len(self.available_strategies):
+            raise ValueError("available_strategies must not contain duplicates")
+
+        if len(set(self.escalation_ladder)) != len(self.escalation_ladder):
+            raise ValueError("escalation_ladder must not contain duplicates")
+        if not set(self.escalation_ladder) <= set(self.available_strategies):
+            raise ValueError(
+                "escalation_ladder must be a subset of available_strategies: a rung "
+                "that cannot run must never appear in the ladder"
+            )
+        if not 0 <= self.max_escalation_steps <= len(self.escalation_ladder) - 1:
+            raise ValueError(
+                "max_escalation_steps must be between 0 and len(escalation_ladder) - 1"
+            )
+
+        unknown_groups = set(self.enabled_feature_groups) - set(FEATURE_GROUPS)
+        if unknown_groups:
+            raise ValueError(f"unknown feature group(s): {sorted(unknown_groups)}")
+        if not self.enabled_feature_groups:
+            raise ValueError("enabled_feature_groups must not be empty")
+
+        if not 0.0 <= self.sufficiency_threshold <= 1.0:
+            raise ValueError("sufficiency_threshold must be within [0, 1]")
+        if not 0.0 <= self.coverage_threshold <= 1.0:
+            raise ValueError("coverage_threshold must be within [0, 1]")
+        if not 0.0 <= self.top1_coverage_threshold <= 1.0:
+            raise ValueError("top1_coverage_threshold must be within [0, 1]")
+        if self.min_results < 1:
+            raise ValueError("min_results must be >= 1")
+        if self.candidate_k < 1:
+            raise ValueError("candidate_k must be >= 1")
+        if self.cost_weight < 0.0:
+            raise ValueError("cost_weight must be >= 0")
         return self
 
 

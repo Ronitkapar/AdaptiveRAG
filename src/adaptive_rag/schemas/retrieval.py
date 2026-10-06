@@ -8,6 +8,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from adaptive_rag.schemas.chunk import ChunkMetadata, ChunkProvenance
+from adaptive_rag.schemas.routing import RoutingTrace
 
 
 class RetrievalResult(BaseModel):
@@ -69,6 +70,18 @@ class RetrievalMetadata(BaseModel):
     candidate_count: int | None = None
     result_count: int | None = None
     rerank_fallback: bool | None = None
+    # Adaptive routing fields (present only when the adaptive pipeline ran). The
+    # routing trace is carried here so it travels with the response and reaches the
+    # experiment trace without the retriever holding mutable per-query state.
+    routing: RoutingTrace | None = None
+    adaptive_router_version: str | None = None
+    adaptive_initial_strategy: str | None = None
+    adaptive_final_strategy: str | None = None
+    adaptive_stage_count: int | None = None
+    adaptive_routing_latency_ms: float | None = None
+    adaptive_initial_latency_ms: float | None = None
+    adaptive_escalated: bool | None = None
+    adaptive_sufficient: bool | None = None
 
 
 class RetrievalResponse(BaseModel):
@@ -85,6 +98,7 @@ class RetrievalResponse(BaseModel):
         "dense_rerank",
         "bm25_rerank",
         "hybrid_rerank",
+        "adaptive",
     ] = "dense"
     status: Literal["ok", "no_results"] = "ok"
     retrieval_metadata: RetrievalMetadata

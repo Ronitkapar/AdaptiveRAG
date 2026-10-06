@@ -125,6 +125,7 @@ class ExtractionIssue(BaseModel):
         "FIGURE_REGION_AMBIGUOUS",
         "METADATA_MISSING",
         "PDF_OPEN_FAILED",
+        "COLUMN_LAYOUT_DETECTED",
     ]
     severity: Literal["info", "warning", "error"]
     message: str
